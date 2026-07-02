@@ -48,12 +48,14 @@ fn receiver_thread(
     };
 
     let mut buffer = vec![0u8; 70000];
+    let mut recv_time = std::time::Duration::ZERO;
 
     loop {
-
+        let t = Instant::now();
         match udp.recv_from(&mut buffer) {
             
             Ok((size, _)) => {
+                 recv_time += t.elapsed();
 
                 if size < 16 {
                     continue;
@@ -103,10 +105,13 @@ fn receiver_thread(
                     }
                 )?;
             }
+          
             Err(ref e)
-    if e.kind() == ErrorKind::TimedOut
-        || e.kind() == ErrorKind::WouldBlock =>
+if e.kind() == ErrorKind::TimedOut
+    || e.kind() == ErrorKind::WouldBlock =>
 {
+    recv_time += t.elapsed();
+
     println!("Receive round finished.");
     break;
 }
@@ -114,7 +119,10 @@ fn receiver_thread(
             Err(e) => return Err(e.into()),
         }
     }
-
+    println!(
+    "Total recv_from() time: {:.3?}",
+    recv_time
+);
     Ok(())
 }
 fn worker_thread(

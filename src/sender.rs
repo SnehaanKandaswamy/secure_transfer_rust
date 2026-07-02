@@ -156,6 +156,7 @@ fn sender_thread(
 ) -> Result<(u64, HashMap<u32, Vec<u8>>)> {
 
         let mut bytes_sent: u64 = 0;
+        let mut send_time = std::time::Duration::ZERO;
         let mut packet_cache =
     HashMap::<u32, Vec<u8>>::new();
         let mut last_chunk = 0u32;
@@ -167,10 +168,14 @@ fn sender_thread(
     let bytes = chunk.bytes;
     let packet = chunk.packet;
 
-    udp.send_to(
-        &packet,
-        format!("{}:{}", HOST, DATA_PORT),
-    )?;
+    let t = Instant::now();
+
+udp.send_to(
+    &packet,
+    format!("{}:{}", HOST, DATA_PORT),
+)?;
+
+send_time += t.elapsed();
 
     packet_cache.insert(
         chunk_id,
@@ -208,12 +213,17 @@ fn sender_thread(
             &bytes_sent.to_be_bytes()
         );
 
-        udp.send_to(
-            &end_packet,
-            format!("{}:{}", HOST, DATA_PORT),
-        )?;
+        let t = Instant::now();
+
+udp.send_to(
+    &end_packet,
+    format!("{}:{}", HOST, DATA_PORT),
+)?;
+
+send_time += t.elapsed();
 
         println!("END packet sent.");
+        println!("Total send_to() time: {:.3?}", send_time);
         Ok((bytes_sent, packet_cache))
     }
     fn handshake(&mut self) -> Result<()> {
