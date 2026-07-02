@@ -1,6 +1,7 @@
 use anyhow::Result;
 use std::time::Instant;
 use rand::{rngs::OsRng, RngCore};
+use std::collections::HashMap;
 use rsa::{
     pkcs8::DecodePublicKey,
     Oaep,
@@ -149,16 +150,23 @@ impl Sender {
     Ok(())
 }
 
-    fn sender_thread(
+fn sender_thread(
     udp: UdpSocket,
-    rx: Receiver<EncryptedChunk>,) -> Result<u64> {
+    rx: Receiver<EncryptedChunk>,
+) -> Result<(u64, HashMap<u32, Vec<u8>>)> {
 
         let mut bytes_sent: u64 = 0;
+        let mut packet_cache =
+    HashMap::<u32, Vec<u8>>::new();
         let mut last_chunk = 0u32;
         let mut next_print: u64 = 500 * 1024 * 1024;
         println!("Sender thread started");
         while let Ok(chunk) = rx.recv() {
-
+            packet_cache.insert(
+                chunk.chunk_id,
+                chunk.packet.clone(),
+            );
+            
             udp.send_to(
                 &chunk.packet,
                 format!("{}:{}", HOST, DATA_PORT),
@@ -200,8 +208,7 @@ impl Sender {
         )?;
 
         println!("END packet sent.");
-
-        Ok(bytes_sent)
+        Ok((bytes_sent, packet_cache))
     }
     fn handshake(&mut self) -> Result<()> {
         println!("Waiting for receiver public key...");
@@ -241,7 +248,9 @@ impl Sender {
         println!("Handshake complete.");
         Ok(())
     }
-    fn send_file(&mut self) -> Result<u64> {
+    fn send_file(
+    &mut self,
+) -> Result<(u64, HashMap<u32, Vec<u8>>)> {
 
     println!("Opening file...");
 
@@ -306,70 +315,13 @@ impl Sender {
 
     sender.join().unwrap()
 }
-fn retransmit_chunk(
-    udp: &UdpSocket,
-    filename: &str,
-    chunk_id: u32,
-    session_key: &[u8; 32],
-    nonce: &[u8; 16],
-) -> Result<()> {
 
-    use std::{
-        fs::File,
-        io::{Read, Seek, SeekFrom},
-    };
+   
 
-    let mut file = File::open(filename)?;
-
-    file.seek(
-        SeekFrom::Start(
-            chunk_id as u64 * CHUNK_SIZE as u64
-        )
-    )?;
-
-    let mut buffer = vec![0u8; CHUNK_SIZE];
-
-    let bytes = file.read(&mut buffer)?;
-
-    buffer.truncate(bytes);
-
-    let encrypted =
-        crate::crypto::encrypt_chunk(
-            &buffer,
-            session_key,
-            nonce,
-            chunk_id,
-        );
-
-    let hash =
-        crate::checksum::chunk_hash(&buffer);
-
-    let mut packet =
-        Vec::with_capacity(16 + encrypted.len());
-
-    packet.extend_from_slice(
-        &chunk_id.to_be_bytes()
-    );
-
-    packet.extend_from_slice(
-        &(encrypted.len() as u32).to_be_bytes()
-    );
-
-    packet.extend_from_slice(
-        &hash.to_be_bytes()
-    );
-
-    packet.extend_from_slice(
-        &encrypted
-    );
-
-    udp.send_to(
-    &packet,
-    format!("{}:{}", HOST, DATA_PORT),
-)?;
-    Ok(())
-}
-fn retransmission_loop(&mut self) -> Result<()> {
+fn retransmission_loop(
+    &mut self,
+    packet_cache: &HashMap<u32, Vec<u8>>,
+) -> Result<()> { 
 
     loop {
 
@@ -399,13 +351,21 @@ fn retransmission_loop(&mut self) -> Result<()> {
             let chunk_id =
                 u32::from_be_bytes(id_buf);
 
-            Self::retransmit_chunk(
-                &self.udp,
-                &self.filename,
-                chunk_id,
-                &self.session_key,
-                &self.nonce,
-            )?;
+            if let Some(packet) =
+                packet_cache.get(&chunk_id)
+            {
+                self.udp.send_to(
+                    packet,
+                    format!("{}:{}", HOST, DATA_PORT),
+                )?;
+            }
+            else {
+
+                println!(
+                    "Chunk {} not found in cache!",
+                    chunk_id
+                );
+            }
         }
 
         println!("Retransmission round complete.");
@@ -451,16 +411,21 @@ fn retransmission_loop(&mut self) -> Result<()> {
     )?;
     let start = Instant::now();
 
+let (bytes_sent, packet_cache) =
+    self.send_file()?;
 
-    let elapsed = start.elapsed();
+// Retransmit until receiver has everything
+self.retransmission_loop(
+    &packet_cache,
+)?;
+let elapsed = start.elapsed();
 
-    let seconds = elapsed.as_secs_f64();
+let seconds = elapsed.as_secs_f64();
 
-    let throughput =
-        bytes_sent as f64
-            / (1024.0 * 1024.0)
-            / seconds;
-
+let throughput =
+    bytes_sent as f64
+        / (1024.0 * 1024.0)
+        / seconds;
     println!();
     println!("==============================");
     println!("Transfer Complete");

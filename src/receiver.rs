@@ -2,6 +2,7 @@ use anyhow::Result;
 use std::time::Instant;
 
 use rand::rngs::OsRng;
+use std::sync::{Arc, Mutex};
 
 use rsa::{
     pkcs8::EncodePublicKey,
@@ -36,23 +37,20 @@ use crate::config::{
 fn receiver_thread(
     udp: UdpSocket,
     tx: ChannelSender<ReceivedPacket>,
-    expected_chunks: u32,
-    expected_bytes: u64,
-) -> Result<(u32, u64,Vec<u32>)> {
-
+    received: Arc<Mutex<Vec<bool>>>,
+) -> Result<()>{
+   
     use std::{
         convert::TryInto,
         io::ErrorKind,
     };
 
     let mut buffer = vec![0u8; 70000];
-    let mut received =vec![false; expected_chunks as usize];
-    let mut end_received = false;
 
     loop {
 
         match udp.recv_from(&mut buffer) {
-
+            
             Ok((size, _)) => {
 
                 if size < 16 {
@@ -63,20 +61,17 @@ fn receiver_thread(
                     u32::from_be_bytes(
                         buffer[0..4].try_into()?
                     );
+                 
+                
 
                 // END packet
                 if chunk_id == u32::MAX {
 
-                   
-                    end_received = true;
+    println!("END packet received.");
 
-                    println!(
-                        "END packet received. Expecting {} chunks.",
-                        expected_chunks
-                    );
-
-                    continue;
-                }
+    break;
+    
+}
 
                 let encrypted_size =
                     u32::from_be_bytes(
@@ -91,9 +86,15 @@ fn receiver_thread(
                     u64::from_be_bytes(
                         buffer[8..16].try_into()?
                     );
-                if chunk_id < expected_chunks {
-                        received[chunk_id as usize] = true;
-                 }
+                {
+    let mut bitmap =
+        received.lock().unwrap();
+
+    if chunk_id < bitmap.len() as u32 {
+
+        bitmap[chunk_id as usize] = true;
+    }
+}
 
                 tx.send(
                     ReceivedPacket {
@@ -104,37 +105,19 @@ fn receiver_thread(
                     }
                 )?;
             }
-
             Err(ref e)
-                if e.kind() == ErrorKind::TimedOut ||
-                   e.kind() == ErrorKind::WouldBlock =>
-            {
-                // Only stop after we've already seen END
-                if end_received {
-                    println!("Receiver thread finished.");
-                    break;
-                }
-
-                continue;
-            }
+    if e.kind() == ErrorKind::TimedOut
+        || e.kind() == ErrorKind::WouldBlock =>
+{
+    println!("Receive round finished.");
+    break;
+}
 
             Err(e) => return Err(e.into()),
         }
     }
 
-    drop(tx);
-    let mut missing = Vec::new();
-
-    for (id, ok) in received.iter().enumerate() {
-
-        if !*ok {
-
-            missing.push(id as u32);
-        }
-    }
-
-    println!("Missing chunks: {}", missing.len());
-    Ok((expected_chunks, expected_bytes,missing))
+    Ok(())
 }
 fn worker_thread(
     rx: Receiver<ReceivedPacket>,
@@ -231,6 +214,26 @@ fn writer_thread(
     println!("Writer finished.");
 
     Ok((bytes,chunks))
+}
+fn find_missing(
+    received: &[bool]
+) -> Vec<u32>
+{
+    received
+        .iter()
+        .enumerate()
+        .filter_map(|(i, ok)| {
+
+            if !*ok {
+
+                Some(i as u32)
+
+            } else {
+
+                None
+            }
+        })
+        .collect()
 }
 pub fn run() -> Result<()> {
 
@@ -363,17 +366,15 @@ let start = Instant::now();
 let (packet_tx, packet_rx) = unbounded();
 let (write_tx, write_rx) = unbounded();
 
-let udp_receiver = udp.try_clone()?;
 
 // Receiver thread
-let receiver_handle = std::thread::spawn(move || {
-    receiver_thread(
-        udp_receiver,
-        packet_tx,
-        expected_chunks,
-        expected_bytes,
-    )
-});
+
+let received =
+    Arc::new(
+        Mutex::new(
+            vec![false; expected_chunks as usize]
+        )
+    );
 
 // Worker threads
 let mut workers = Vec::new();
@@ -401,18 +402,61 @@ for _ in 0..NUM_WORKERS {
 }
 
 drop(write_tx);
-
+let mut round = 1;
 // Writer thread
 let writer_handle = std::thread::spawn(move || {
     writer_thread(write_rx)
 });
 
-// Wait for receiver
-let (
-    expected_chunks,
-    expected_bytes,
-    missing,
-) = receiver_handle.join().unwrap()?;
+loop {
+
+    println!();
+    println!("========== Round {} ==========", round);
+
+    let udp_receiver = udp.try_clone()?;
+
+    receiver_thread(
+        udp_receiver,
+        packet_tx.clone(),
+        received.clone(),
+        
+    )?;
+    
+
+    let missing = {
+    let bitmap = received.lock().unwrap();
+    find_missing(&bitmap)
+};
+
+println!("Missing chunks: {}", missing.len());
+
+if missing.is_empty() {
+
+    println!("All chunks received.");
+
+    // Tell sender we're done
+    stream.write_all(&0u32.to_be_bytes())?;
+
+    break;
+}
+
+println!("Requesting retransmission...");
+
+// Send number of missing chunks
+stream.write_all(&(missing.len() as u32).to_be_bytes())?;
+
+// Send each missing chunk ID
+for id in &missing {
+
+    stream.write_all(&id.to_be_bytes())?;
+}
+
+round += 1;
+}
+drop(packet_tx);   // <-- ADD IT HERE
+
+
+
 // Wait for workers
 for worker in workers {
     worker.join().unwrap()?;
@@ -433,16 +477,7 @@ println!(
     total_chunks
 );
 
-if missing.is_empty() {
 
-    println!("All chunks received.");
-
-} else {
-
-    println!("Missing {} chunks.", missing.len());
-
-    println!("{:?}", missing);
-}
 println!(
     "Expected Data : {:.2} MB",
     expected_bytes as f64 /
