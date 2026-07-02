@@ -1,11 +1,11 @@
 use anyhow::Result;
 use std::time::Instant;
-
 use rand::rngs::OsRng;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+use std::io::BufWriter;
 use rsa::{
     pkcs8::EncodePublicKey,
     Oaep,
@@ -157,56 +157,70 @@ fn worker_thread(
 }
 fn writer_thread(
     rx: Receiver<DecryptedChunk>,
+    expected_bytes: u64,
+    expected_chunks: u32,
 ) -> Result<(u64,u32)> {
 
-    use std::{
-        fs::OpenOptions,
-        io::{Seek,SeekFrom,Write},
-    };
+   use std::fs::OpenOptions;
 
-    let mut outfile =
-        OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open("reconstructed.bin")?;
+let file = OpenOptions::new()
+    .create(true)
+    .write(true)
+    .truncate(true)
+    .open("reconstructed.bin")?;
 
+// Reserve the entire file size
+file.set_len(expected_bytes)?;
+
+let mut outfile = BufWriter::with_capacity(
+    8 * 1024 * 1024,
+    file,
+);
     let mut bytes = 0u64;
-    let mut chunks = 0u32;
-
+    let mut chunks_written = 0u32;
+    let mut next_chunk = 0u32;
+    let mut chunks: Vec<Option<Vec<u8>>> =
+    (0..expected_chunks)
+        .map(|_| None)
+        .collect();
     let mut next_print =
         500 * 1024 * 1024;
 
     let io_start = Instant::now();
     while let Ok(chunk) = rx.recv() {
 
-        outfile.seek(
-            SeekFrom::Start(
-                chunk.chunk_id as u64 *
-                CHUNK_SIZE as u64
-            )
-        )?;
+    chunks[chunk.chunk_id as usize] = Some(chunk.data);
 
-        outfile.write_all(
-            &chunk.data
-        )?;
+while next_chunk < expected_chunks {
 
-        bytes += chunk.data.len() as u64;
+    let Some(data) =
+        chunks[next_chunk as usize].take()
+    else {
+        break;
+    };
 
-        chunks += 1;
+    outfile.write_all(&data)?;
 
-        if bytes >= next_print {
+    bytes += data.len() as u64;
 
-            println!(
-                "Received {:.2} MB",
-                bytes as f64 /
-                (1024.0*1024.0)
-            );
+    chunks_written += 1;
 
-            next_print +=
-                500 * 1024 * 1024;
-        }
+    next_chunk += 1;
+
+    if bytes >= next_print {
+
+        println!(
+            "Received {:.2} MB",
+            bytes as f64 /
+            (1024.0 * 1024.0)
+        );
+
+        next_print += 500 * 1024 * 1024;
     }
+}
+
+
+}
     println!(
     "Actual file writes: {:?}",
     io_start.elapsed()
@@ -216,7 +230,7 @@ fn writer_thread(
 
     println!("Writer finished.");
 
-    Ok((bytes,chunks))
+    Ok((bytes,chunks_written))
 }
 fn find_missing(
     received: &[AtomicBool]
@@ -406,9 +420,15 @@ drop(write_tx);
 let receive_start = Instant::now();
 let mut round = 1;
 // Writer thread
-let writer_handle = std::thread::spawn(move || {
-    writer_thread(write_rx)
-});
+
+let writer_handle =
+    std::thread::spawn(move || {
+        writer_thread(
+            write_rx,
+            expected_bytes,
+            expected_chunks,
+        )
+    });
 
 loop {
 
