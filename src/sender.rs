@@ -162,30 +162,36 @@ fn sender_thread(
         let mut next_print: u64 = 500 * 1024 * 1024;
         println!("Sender thread started");
         while let Ok(chunk) = rx.recv() {
-            packet_cache.insert(
-                chunk.chunk_id,
-                chunk.packet.clone(),
-            );
-            
-            udp.send_to(
-                &chunk.packet,
-                format!("{}:{}", HOST, DATA_PORT),
-            )?;
 
-            bytes_sent += chunk.bytes as u64;
+    let chunk_id = chunk.chunk_id;
+    let bytes = chunk.bytes;
+    let packet = chunk.packet;
 
-            last_chunk = last_chunk.max(chunk.chunk_id);
-            if bytes_sent >= next_print {
+    udp.send_to(
+        &packet,
+        format!("{}:{}", HOST, DATA_PORT),
+    )?;
 
-                println!(
-                    "Sent {:.2} MB",
-                    bytes_sent as f64 /
-                    (1024.0 * 1024.0)
-                );
+    packet_cache.insert(
+        chunk_id,
+        packet,
+    );
 
-                next_print += 500 * 1024 * 1024;
-            }
-        }
+    bytes_sent += bytes as u64;
+
+    last_chunk = last_chunk.max(chunk_id);
+
+    if bytes_sent >= next_print {
+
+        println!(
+            "Sent {:.2} MB",
+            bytes_sent as f64 /
+            (1024.0 * 1024.0)
+        );
+
+        next_print += 500 * 1024 * 1024;
+    }
+}
         println!("Sender channel closed");
 
         let mut end_packet = Vec::with_capacity(16);
@@ -411,15 +417,33 @@ fn retransmission_loop(
     )?;
     let start = Instant::now();
 
+// ---------------- Handshake already completed ----------------
+
+// Measure initial transfer
+let transfer_start = Instant::now();
+
 let (bytes_sent, packet_cache) =
     self.send_file()?;
 
-// Retransmit until receiver has everything
+println!(
+    "Initial transfer : {:.3?}",
+    transfer_start.elapsed()
+);
+
+// Measure retransmission
+let retrans_start = Instant::now();
+
 self.retransmission_loop(
     &packet_cache,
 )?;
-let elapsed = start.elapsed();
 
+println!(
+    "Retransmission   : {:.3?}",
+    retrans_start.elapsed()
+);
+
+// Total
+let elapsed = start.elapsed();
 let seconds = elapsed.as_secs_f64();
 
 let throughput =

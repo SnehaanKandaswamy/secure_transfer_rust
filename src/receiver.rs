@@ -2,8 +2,10 @@ use anyhow::Result;
 use std::time::Instant;
 
 use rand::rngs::OsRng;
-use std::sync::{Arc, Mutex};
-
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use rsa::{
     pkcs8::EncodePublicKey,
     Oaep,
@@ -37,7 +39,7 @@ use crate::config::{
 fn receiver_thread(
     udp: UdpSocket,
     tx: ChannelSender<ReceivedPacket>,
-    received: Arc<Mutex<Vec<bool>>>,
+    received: Arc<Vec<AtomicBool>>,
 ) -> Result<()>{
    
     use std::{
@@ -86,14 +88,10 @@ fn receiver_thread(
                     u64::from_be_bytes(
                         buffer[8..16].try_into()?
                     );
-                {
-    let mut bitmap =
-        received.lock().unwrap();
+              if chunk_id < received.len() as u32 {
 
-    if chunk_id < bitmap.len() as u32 {
-
-        bitmap[chunk_id as usize] = true;
-    }
+    received[chunk_id as usize]
+        .store(true, Ordering::Relaxed);
 }
 
                 tx.send(
@@ -179,6 +177,7 @@ fn writer_thread(
     let mut next_print =
         500 * 1024 * 1024;
 
+    let io_start = Instant::now();
     while let Ok(chunk) = rx.recv() {
 
         outfile.seek(
@@ -208,6 +207,10 @@ fn writer_thread(
                 500 * 1024 * 1024;
         }
     }
+    println!(
+    "Actual file writes: {:?}",
+    io_start.elapsed()
+);
 
     outfile.flush()?;
 
@@ -216,7 +219,7 @@ fn writer_thread(
     Ok((bytes,chunks))
 }
 fn find_missing(
-    received: &[bool]
+    received: &[AtomicBool]
 ) -> Vec<u32>
 {
     received
@@ -224,8 +227,7 @@ fn find_missing(
         .enumerate()
         .filter_map(|(i, ok)| {
 
-            if !*ok {
-
+            if !ok.load(Ordering::Relaxed) {
                 Some(i as u32)
 
             } else {
@@ -369,12 +371,11 @@ let (write_tx, write_rx) = unbounded();
 
 // Receiver thread
 
-let received =
-    Arc::new(
-        Mutex::new(
-            vec![false; expected_chunks as usize]
-        )
-    );
+let received = Arc::new(
+    (0..expected_chunks as usize)
+        .map(|_| AtomicBool::new(false))
+        .collect::<Vec<_>>()
+);
 
 // Worker threads
 let mut workers = Vec::new();
@@ -402,6 +403,7 @@ for _ in 0..NUM_WORKERS {
 }
 
 drop(write_tx);
+let receive_start = Instant::now();
 let mut round = 1;
 // Writer thread
 let writer_handle = std::thread::spawn(move || {
@@ -423,10 +425,7 @@ loop {
     )?;
     
 
-    let missing = {
-    let bitmap = received.lock().unwrap();
-    find_missing(&bitmap)
-};
+    let missing = find_missing(&received);
 
 println!("Missing chunks: {}", missing.len());
 
@@ -455,16 +454,28 @@ round += 1;
 }
 drop(packet_tx);   // <-- ADD IT HERE
 
-
+println!(
+    "Receive rounds  : {:.3?}",
+    receive_start.elapsed()
+);
+let worker_start = Instant::now();
 
 // Wait for workers
 for worker in workers {
     worker.join().unwrap()?;
 }
-
+println!(
+    "Workers         : {:.3?}",
+    worker_start.elapsed()
+);
+let writer_start = Instant::now();
 // Wait for writer
 let (bytes_received, total_chunks) =
     writer_handle.join().unwrap()?;
+println!(
+    "Writer          : {:.3?}",
+    writer_start.elapsed()
+);
 println!();
 
 println!(
