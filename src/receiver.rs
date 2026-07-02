@@ -472,4 +472,3 @@ println!("Throughput  : {:.2} MB/s", throughput);
 
 Ok(())
 }
-

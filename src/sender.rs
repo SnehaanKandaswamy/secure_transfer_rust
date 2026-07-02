@@ -306,6 +306,132 @@ impl Sender {
 
     sender.join().unwrap()
 }
+fn retransmit_chunk(
+    udp: &UdpSocket,
+    filename: &str,
+    chunk_id: u32,
+    session_key: &[u8; 32],
+    nonce: &[u8; 16],
+) -> Result<()> {
+
+    use std::{
+        fs::File,
+        io::{Read, Seek, SeekFrom},
+    };
+
+    let mut file = File::open(filename)?;
+
+    file.seek(
+        SeekFrom::Start(
+            chunk_id as u64 * CHUNK_SIZE as u64
+        )
+    )?;
+
+    let mut buffer = vec![0u8; CHUNK_SIZE];
+
+    let bytes = file.read(&mut buffer)?;
+
+    buffer.truncate(bytes);
+
+    let encrypted =
+        crate::crypto::encrypt_chunk(
+            &buffer,
+            session_key,
+            nonce,
+            chunk_id,
+        );
+
+    let hash =
+        crate::checksum::chunk_hash(&buffer);
+
+    let mut packet =
+        Vec::with_capacity(16 + encrypted.len());
+
+    packet.extend_from_slice(
+        &chunk_id.to_be_bytes()
+    );
+
+    packet.extend_from_slice(
+        &(encrypted.len() as u32).to_be_bytes()
+    );
+
+    packet.extend_from_slice(
+        &hash.to_be_bytes()
+    );
+
+    packet.extend_from_slice(
+        &encrypted
+    );
+
+    udp.send_to(
+    &packet,
+    format!("{}:{}", HOST, DATA_PORT),
+)?;
+    Ok(())
+}
+fn retransmission_loop(&mut self) -> Result<()> {
+
+    loop {
+
+        let mut count_buf = [0u8; 4];
+
+        self.tcp.read_exact(&mut count_buf)?;
+
+        let count = u32::from_be_bytes(count_buf);
+
+        if count == 0 {
+
+            println!("Receiver has all chunks.");
+            break;
+        }
+
+        println!(
+            "Retransmitting {} chunks...",
+            count
+        );
+
+        for _ in 0..count {
+
+            let mut id_buf = [0u8; 4];
+
+            self.tcp.read_exact(&mut id_buf)?;
+
+            let chunk_id =
+                u32::from_be_bytes(id_buf);
+
+            Self::retransmit_chunk(
+                &self.udp,
+                &self.filename,
+                chunk_id,
+                &self.session_key,
+                &self.nonce,
+            )?;
+        }
+
+        println!("Retransmission round complete.");
+
+        let mut end_packet = Vec::with_capacity(16);
+
+        end_packet.extend_from_slice(
+            &u32::MAX.to_be_bytes()
+        );
+
+        end_packet.extend_from_slice(
+            &0u32.to_be_bytes()
+        );
+
+        end_packet.extend_from_slice(
+            &0u64.to_be_bytes()
+        );
+
+        self.udp.send_to(
+            &end_packet,
+            format!("{}:{}", HOST, DATA_PORT),
+        )?;
+    }
+
+    Ok(())
+}
    pub fn run(&mut self) -> Result<()> {
 
     println!("==============================");
@@ -325,7 +451,6 @@ impl Sender {
     )?;
     let start = Instant::now();
 
-    let bytes_sent = self.send_file()?;
 
     let elapsed = start.elapsed();
 
