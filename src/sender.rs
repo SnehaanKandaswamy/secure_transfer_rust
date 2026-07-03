@@ -217,7 +217,7 @@ send_time += t.elapsed();
 
 udp.send_to(
     &end_packet,
-    format!("{}:{}", HOST, DATA_PORT),
+    format!("{}:{}", RECEIVER_IP, DATA_PORT),
 )?;
 
 send_time += t.elapsed();
@@ -372,7 +372,7 @@ fn retransmission_loop(
             {
                 self.udp.send_to(
                     packet,
-                    format!("{}:{}", HOST, DATA_PORT),
+                    format!("{}:{}", RECEIVER_IP, DATA_PORT),
                 )?;
             }
             else {
@@ -402,7 +402,7 @@ fn retransmission_loop(
 
         self.udp.send_to(
             &end_packet,
-            format!("{}:{}", HOST, DATA_PORT),
+            format!("{}:{}", RECEIVER_IP, DATA_PORT),
         )?;
     }
 
