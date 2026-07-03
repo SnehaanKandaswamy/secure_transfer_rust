@@ -49,12 +49,14 @@ fn receiver_thread(
 
     let mut buffer = vec![0u8; 70000];
     let mut recv_time = std::time::Duration::ZERO;
-
+    let mut end_seen = false;
+    let mut end_timeout_count = 0;
     loop {
         let t = Instant::now();
         match udp.recv_from(&mut buffer) {
             
             Ok((size, _)) => {
+                end_timeout_count = 0;
                  recv_time += t.elapsed();
 
                 if size < 16 {
@@ -72,8 +74,9 @@ fn receiver_thread(
                 if chunk_id == u32::MAX {
 
     println!("END packet received.");
+    end_seen=true;
 
-    break;
+    continue;
     
 }
 
@@ -106,14 +109,23 @@ fn receiver_thread(
                 )?;
             }
           
-            Err(ref e)
+           Err(ref e)
 if e.kind() == ErrorKind::TimedOut
     || e.kind() == ErrorKind::WouldBlock =>
 {
     recv_time += t.elapsed();
 
-    println!("Receive round finished.");
-    break;
+    if end_seen {
+
+        end_timeout_count += 1;
+
+        if end_timeout_count >= 3 {
+            println!("Receive round finished.");
+            break;
+        }
+    }
+
+    continue;
 }
 
             Err(e) => return Err(e.into()),
