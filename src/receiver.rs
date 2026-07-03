@@ -425,9 +425,29 @@ for _ in 0..NUM_WORKERS {
 }
 
 drop(write_tx);
+
 let receive_start = Instant::now();
+
 let mut round = 1;
-// Writer thread
+
+// ---------- Spawn ONE UDP receiver thread ----------
+
+let udp_receiver = udp.try_clone()?;
+
+let packet_sender = packet_tx.clone();
+
+let received_flags = received.clone();
+
+let receiver_handle = std::thread::spawn(move || {
+
+    receiver_thread(
+        udp_receiver,
+        packet_sender,
+        received_flags,
+    )
+});
+
+// ---------- Writer thread ----------
 
 let writer_handle =
     std::thread::spawn(move || {
@@ -443,14 +463,7 @@ loop {
     println!();
     println!("========== Round {} ==========", round);
 
-    let udp_receiver = udp.try_clone()?;
-
-    receiver_thread(
-        udp_receiver,
-        packet_tx.clone(),
-        received.clone(),
-        
-    )?;
+    
     
 let missing = find_missing(&received);
 
@@ -488,7 +501,7 @@ for id in &missing {
 round += 1;
 }
 drop(packet_tx);   // <-- ADD IT HERE
-
+receiver_handle.join().unwrap()?;
 println!(
     "Receive rounds  : {:.3?}",
     receive_start.elapsed()
