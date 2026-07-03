@@ -16,7 +16,7 @@ use std::{
 
 use crate::{
     checksum,
-    config::{CHUNK_SIZE, DATA_PORT, HOST, KEY_PORT},
+    config::{CHUNK_SIZE, DATA_PORT, RECEIVER_IP, KEY_PORT},
     crypto,
 };
 
@@ -40,10 +40,10 @@ pub struct Sender {
 impl Sender {
     pub fn new(filename: &str) -> Result<Self> {
         let tcp = TcpStream::connect(
-            format!("{}:{}", HOST, KEY_PORT),
+            format!("{}:{}", RECEIVER_IP, KEY_PORT),
         )?;
 
-        let udp = UdpSocket::bind("127.0.0.1:0")?;
+        let udp = UdpSocket::bind("0.0.0.0:0")?;
         use socket2::SockRef;
 
         SockRef::from(&udp)
@@ -172,7 +172,7 @@ fn sender_thread(
 
 udp.send_to(
     &packet,
-    format!("{}:{}", HOST, DATA_PORT),
+    format!("{}:{}", RECEIVER_IP, DATA_PORT),
 )?;
 
 send_time += t.elapsed();
