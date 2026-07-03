@@ -174,7 +174,11 @@ udp.send_to(
     &packet,
     format!("{}:{}", RECEIVER_IP, DATA_PORT),
 )?;
-
+if chunk_id % 32 == 0 {
+    std::thread::sleep(
+        std::time::Duration::from_micros(200)
+    );
+}
 send_time += t.elapsed();
 
     packet_cache.insert(
