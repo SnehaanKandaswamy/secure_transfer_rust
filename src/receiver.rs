@@ -3,7 +3,7 @@ use std::time::Instant;
 use rand::rngs::OsRng;
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool,AtomicU32, Ordering},
 };
 use std::io::BufWriter;
 use rsa::{
@@ -40,6 +40,7 @@ fn receiver_thread(
     udp: UdpSocket,
     tx: ChannelSender<ReceivedPacket>,
     received: Arc<Vec<AtomicBool>>,
+    running: Arc<AtomicBool>,
 ) -> Result<()>{
    
     use std::{
@@ -51,7 +52,7 @@ fn receiver_thread(
     let mut recv_time = std::time::Duration::ZERO;
     let mut end_seen = false;
     let mut end_timeout_count = 0;
-    loop {
+while running.load(Ordering::Acquire) {
         let t = Instant::now();
         match udp.recv_from(&mut buffer) {
             
@@ -75,7 +76,7 @@ fn receiver_thread(
 
     println!("END packet received.");
 
-    break;
+    continue;
 }
 
                 let encrypted_size =
@@ -112,8 +113,7 @@ if e.kind() == ErrorKind::TimedOut
 {
     recv_time += t.elapsed();
 
-    println!("Receive round finished.");
-    break;
+    continue;
 }
 
             Err(e) => return Err(e.into()),
@@ -398,6 +398,7 @@ let received = Arc::new(
         .map(|_| AtomicBool::new(false))
         .collect::<Vec<_>>()
 );
+let running = Arc::new(AtomicBool::new(true));
 
 // Worker threads
 let mut workers = Vec::new();
@@ -438,12 +439,15 @@ let packet_sender = packet_tx.clone();
 
 let received_flags = received.clone();
 
+let running_clone = running.clone();
+
 let receiver_handle = std::thread::spawn(move || {
 
     receiver_thread(
         udp_receiver,
         packet_sender,
         received_flags,
+        running_clone,
     )
 });
 
@@ -481,8 +485,9 @@ if missing.is_empty() {
 
     println!("All chunks received.");
 
-    // Tell sender we're done
     stream.write_all(&0u32.to_be_bytes())?;
+
+    running.store(false, Ordering::Release);
 
     break;
 }
