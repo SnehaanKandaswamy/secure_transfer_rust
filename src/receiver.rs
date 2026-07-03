@@ -452,10 +452,17 @@ loop {
         
     )?;
     
-
-    let missing = find_missing(&received);
+let missing = find_missing(&received);
 
 println!("Missing chunks: {}", missing.len());
+
+if !missing.is_empty() {
+    println!(
+        "First few missing IDs: {:?}",
+        &missing[..missing.len().min(10)]
+    );
+}
+
 
 if missing.is_empty() {
 
