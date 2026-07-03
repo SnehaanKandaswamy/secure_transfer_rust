@@ -74,10 +74,8 @@ fn receiver_thread(
                 if chunk_id == u32::MAX {
 
     println!("END packet received.");
-    end_seen=true;
 
-    continue;
-    
+    break;
 }
 
                 let encrypted_size =
@@ -108,24 +106,14 @@ fn receiver_thread(
                     }
                 )?;
             }
-          
-           Err(ref e)
+          Err(ref e)
 if e.kind() == ErrorKind::TimedOut
     || e.kind() == ErrorKind::WouldBlock =>
 {
     recv_time += t.elapsed();
 
-    if end_seen {
-
-        end_timeout_count += 1;
-
-        if end_timeout_count >= 3 {
-            println!("Receive round finished.");
-            break;
-        }
-    }
-
-    continue;
+    println!("Receive round finished.");
+    break;
 }
 
             Err(e) => return Err(e.into()),
