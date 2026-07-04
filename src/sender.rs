@@ -2,6 +2,8 @@ use anyhow::Result;
 use std::time::Instant;
 const INITIAL_TRANSFER_COMPLETE: u8 = 0xA1;
 const RETRANSMISSION_COMPLETE: u8 = 0xA2;
+const PACING_INTERVAL: u32 = 64;
+const PACING_DELAY_US: u64 = 200;
 use rand::{rngs::OsRng, RngCore};
 use std::collections::HashMap;
 use rsa::{
@@ -22,12 +24,12 @@ use crate::{
     crypto,
 };
 
-use crossbeam_channel::{unbounded, Receiver, Sender as ChannelSender};
+use crossbeam_channel::{bounded, Receiver, Sender as ChannelSender};
 
 use crate::pipeline::{
     ReadChunk,
     EncryptedChunk,
-    NUM_WORKERS,
+    worker_count,
 };
 pub struct Sender {
     tcp: TcpStream,
@@ -175,8 +177,10 @@ udp.send_to(
     &packet,
     format!("{}:{}", RECEIVER_IP, DATA_PORT),
 )?;
-if chunk_id % 128 == 0 {
-    std::thread::yield_now();
+if chunk_id % PACING_INTERVAL == 0 {
+    std::thread::sleep(
+        std::time::Duration::from_micros(PACING_DELAY_US),
+    );
 }
 
 send_time += t.elapsed();
@@ -185,7 +189,9 @@ send_time += t.elapsed();
         chunk_id,
         packet,
     );
-    if chunk_id % 100 == 0 {
+   const DEBUG: bool = false;
+
+if DEBUG && chunk_id % 100 == 0 {
     println!("Sent chunk {}", chunk_id);
 }
 
@@ -206,30 +212,8 @@ send_time += t.elapsed();
 }
         println!("Sender channel closed");
 
-        let mut end_packet = Vec::with_capacity(16);
+      
 
-        end_packet.extend_from_slice(
-            &u32::MAX.to_be_bytes()
-        );
-
-        end_packet.extend_from_slice(
-      &(last_chunk + 1).to_be_bytes()
-        );
-
-        end_packet.extend_from_slice(
-            &bytes_sent.to_be_bytes()
-        );
-
-        let t = Instant::now();
-
-udp.send_to(
-    &end_packet,
-    format!("{}:{}", RECEIVER_IP, DATA_PORT),
-)?;
-
-send_time += t.elapsed();
-
-        println!("END packet sent.");
         println!("Total send_to() time: {:.3?}", send_time);
         Ok((bytes_sent, packet_cache))
     }
@@ -277,9 +261,10 @@ send_time += t.elapsed();
 
     println!("Opening file...");
 
-    let (read_tx, read_rx) = unbounded();
-    let (send_tx, send_rx) = unbounded();
+    use crossbeam_channel::bounded;
 
+let (read_tx, read_rx) = bounded(512);
+let (send_tx, send_rx) = bounded(512);
     let filename = self.filename.clone();
 
     let key = self.session_key;
@@ -298,8 +283,7 @@ send_time += t.elapsed();
     // Workers
     let mut workers = Vec::new();
 
-    for _ in 0..NUM_WORKERS {
-
+for _ in 0..worker_count() {
         let rx = read_rx.clone();
 
         let tx = send_tx.clone();

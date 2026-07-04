@@ -5,7 +5,7 @@ use std::time::Instant;
 use rand::rngs::OsRng;
 use std::sync::{
     Arc,
-    atomic::{AtomicBool,AtomicU32, Ordering},
+    atomic::{AtomicBool, Ordering},
 };
 use std::io::BufWriter;
 use rsa::{
@@ -24,10 +24,10 @@ use std::{
 use crate::pipeline::{
     ReceivedPacket,
     DecryptedChunk,
-    NUM_WORKERS,
+    worker_count,
 };
 use crossbeam_channel::{
-    unbounded,
+    bounded,
     Receiver,
     Sender as ChannelSender,
 };
@@ -81,12 +81,8 @@ while running.load(Ordering::Acquire) {
 
                 // END packet
                 // END packet
-if chunk_id == u32::MAX {
 
-    println!("END packet received.");
-
-    continue;
-}
+ 
                 let encrypted_size =
                     u32::from_be_bytes(
                         buffer[4..8].try_into()?
@@ -104,7 +100,9 @@ if chunk_id == u32::MAX {
 
     received[chunk_id as usize]
         .store(true, Ordering::Relaxed);
-    if chunk_id % 100 == 0 {
+    const DEBUG: bool = false;
+
+if DEBUG && chunk_id % 100 == 0 {
     println!("Received chunk {}", chunk_id);
 }
         
@@ -416,9 +414,8 @@ println!(
     );
 
 let start = Instant::now();
-
-let (packet_tx, packet_rx) = unbounded();
-let (write_tx, write_rx) = unbounded();
+let (packet_tx, packet_rx) = bounded(512);
+let (write_tx, write_rx) = bounded(512);
 
 
 // Receiver thread
@@ -434,8 +431,7 @@ let running = Arc::new(AtomicBool::new(true));
 // Worker threads
 let mut workers = Vec::new();
 
-for _ in 0..NUM_WORKERS {
-
+for _ in 0..worker_count() {
     let rx = packet_rx.clone();
 
     let tx = write_tx.clone();

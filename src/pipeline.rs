@@ -1,4 +1,6 @@
-pub const NUM_WORKERS: usize = 4;
+pub fn worker_count() -> usize {
+    std::cmp::max(2, num_cpus::get() - 1)
+}
 
 pub struct ReadChunk {
     pub chunk_id: u32,
