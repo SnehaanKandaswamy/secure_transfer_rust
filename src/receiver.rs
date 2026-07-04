@@ -52,14 +52,12 @@ fn receiver_thread(
 
     let mut buffer = vec![0u8; 70000];
     let mut recv_time = std::time::Duration::ZERO;
-    let mut end_seen = false;
-    let mut end_timeout_count = 0;
+   
 while running.load(Ordering::Acquire) {
         let t = Instant::now();
         match udp.recv_from(&mut buffer) {
             
             Ok((size, _)) => {
-                end_timeout_count = 0;
                  recv_time += t.elapsed();
 
                 if size < 16 {
@@ -70,24 +68,10 @@ while running.load(Ordering::Acquire) {
                     u32::from_be_bytes(
                         buffer[0..4].try_into()?
                     );
-               if chunk_id == 7992
-    || chunk_id == 9858
-    || chunk_id == 12726
-    || chunk_id == 13284
-{
-    println!("Receiver got retransmitted chunk {}", chunk_id);
-}
+
                 
 
-                // END packet
-                // END packet
-if chunk_id == u32::MAX {
-
-    println!("END packet received.");
-
-    continue;
-}
-                let encrypted_size =
+                        let encrypted_size =
                     u32::from_be_bytes(
                         buffer[4..8].try_into()?
                     ) as usize;
@@ -104,9 +88,7 @@ if chunk_id == u32::MAX {
 
     received[chunk_id as usize]
         .store(true, Ordering::Relaxed);
-    if chunk_id % 100 == 0 {
-    println!("Received chunk {}", chunk_id);
-}
+
         
 }
 
@@ -159,24 +141,11 @@ fn worker_thread(
         &decrypted
     );
 
-// Debug only for the problematic chunks
-if packet.chunk_id == 7992
-    || packet.chunk_id == 9858
-    || packet.chunk_id == 12726
-    || packet.chunk_id == 13284
-{
-    println!("Worker processing chunk {}", packet.chunk_id);
-}
+
 
 if hash != packet.hash {
 
-    if packet.chunk_id == 7992
-        || packet.chunk_id == 9858
-        || packet.chunk_id == 12726
-        || packet.chunk_id == 13284
-    {
-        println!("Hash mismatch for chunk {}", packet.chunk_id);
-    }
+   
 
     continue;
 }
@@ -303,7 +272,7 @@ pub fn run() -> Result<()> {
     use std::time::Duration;
 
 udp.set_read_timeout(
-    Some(Duration::from_millis(100))
+    Some(Duration::from_millis(1))
 )?;
     use socket2::Socket;
 

@@ -175,9 +175,7 @@ udp.send_to(
     &packet,
     format!("{}:{}", RECEIVER_IP, DATA_PORT),
 )?;
-if chunk_id % 128 == 0 {
-    std::thread::yield_now();
-}
+
 
 send_time += t.elapsed();
 
@@ -185,9 +183,7 @@ send_time += t.elapsed();
         chunk_id,
         packet,
     );
-    if chunk_id % 100 == 0 {
-    println!("Sent chunk {}", chunk_id);
-}
+   
 
     bytes_sent += bytes as u64;
 
@@ -206,30 +202,7 @@ send_time += t.elapsed();
 }
         println!("Sender channel closed");
 
-        let mut end_packet = Vec::with_capacity(16);
-
-        end_packet.extend_from_slice(
-            &u32::MAX.to_be_bytes()
-        );
-
-        end_packet.extend_from_slice(
-      &(last_chunk + 1).to_be_bytes()
-        );
-
-        end_packet.extend_from_slice(
-            &bytes_sent.to_be_bytes()
-        );
-
-        let t = Instant::now();
-
-udp.send_to(
-    &end_packet,
-    format!("{}:{}", RECEIVER_IP, DATA_PORT),
-)?;
-
-send_time += t.elapsed();
-
-        println!("END packet sent.");
+      
         println!("Total send_to() time: {:.3?}", send_time);
         Ok((bytes_sent, packet_cache))
     }
