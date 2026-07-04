@@ -27,7 +27,7 @@ use crate::pipeline::{
     NUM_WORKERS,
 };
 use crossbeam_channel::{
-    bounded,
+   unbounded,
     Receiver,
     Sender as ChannelSender,
 };
