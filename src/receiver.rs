@@ -68,11 +68,12 @@ while running.load(Ordering::Acquire) {
                     u32::from_be_bytes(
                         buffer[0..4].try_into()?
                     );
-                 if chunk_id == 93
-    || chunk_id == 99
-    || chunk_id == 101
+               if chunk_id == 7992
+    || chunk_id == 9858
+    || chunk_id == 12726
+    || chunk_id == 13284
 {
-    println!("Receiver got chunk {}", chunk_id);
+    println!("Receiver got retransmitted chunk {}", chunk_id);
 }
                 
 
@@ -151,14 +152,32 @@ fn worker_thread(
                 packet.chunk_id,
             );
 
-        let hash =
-            crate::checksum::chunk_hash(
-                &decrypted
-            );
+       let hash =
+    crate::checksum::chunk_hash(
+        &decrypted
+    );
 
-        if hash != packet.hash {
-            continue;
-        }
+// Debug only for the problematic chunks
+if packet.chunk_id == 7992
+    || packet.chunk_id == 9858
+    || packet.chunk_id == 12726
+    || packet.chunk_id == 13284
+{
+    println!("Worker processing chunk {}", packet.chunk_id);
+}
+
+if hash != packet.hash {
+
+    if packet.chunk_id == 7992
+        || packet.chunk_id == 9858
+        || packet.chunk_id == 12726
+        || packet.chunk_id == 13284
+    {
+        println!("Hash mismatch for chunk {}", packet.chunk_id);
+    }
+
+    continue;
+}
 
         tx.send(
             DecryptedChunk {
