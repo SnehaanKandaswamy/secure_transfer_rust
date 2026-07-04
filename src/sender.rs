@@ -1,5 +1,7 @@
 use anyhow::Result;
 use std::time::Instant;
+const INITIAL_TRANSFER_COMPLETE: u8 = 0xA1;
+const RETRANSMISSION_COMPLETE: u8 = 0xA2;
 use rand::{rngs::OsRng, RngCore};
 use std::collections::HashMap;
 use rsa::{
@@ -36,7 +38,6 @@ pub struct Sender {
 
     filename: String,
 }
-const INITIAL_TRANSFER_COMPLETE: u8 = 0xA1;
 impl Sender {
     pub fn new(filename: &str) -> Result<Self> {
         let tcp = TcpStream::connect(

@@ -1,4 +1,6 @@
 use anyhow::Result;
+const INITIAL_TRANSFER_COMPLETE: u8 = 0xA1;
+const RETRANSMISSION_COMPLETE: u8 = 0xA2;
 use std::time::Instant;
 use rand::rngs::OsRng;
 use std::sync::{
@@ -35,7 +37,7 @@ use crate::config::{
     HOST,
     KEY_PORT,
 };
-const INITIAL_TRANSFER_COMPLETE: u8 = 0xA2;
+
 fn receiver_thread(
     udp: UdpSocket,
     tx: ChannelSender<ReceivedPacket>,
