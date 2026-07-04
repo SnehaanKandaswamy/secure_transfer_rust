@@ -5,7 +5,7 @@ use std::time::Instant;
 use rand::rngs::OsRng;
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool,AtomicU32, Ordering},
 };
 use std::io::BufWriter;
 use rsa::{
@@ -27,12 +27,12 @@ use crate::pipeline::{
     NUM_WORKERS,
 };
 use crossbeam_channel::{
-   unbounded,
+    unbounded,
     Receiver,
     Sender as ChannelSender,
 };
 use crate::config::{
-   
+    CHUNK_SIZE,
     DATA_PORT,
     HOST,
     KEY_PORT,
@@ -52,13 +52,14 @@ fn receiver_thread(
 
     let mut buffer = vec![0u8; 70000];
     let mut recv_time = std::time::Duration::ZERO;
-
+    let mut end_seen = false;
+    let mut end_timeout_count = 0;
 while running.load(Ordering::Acquire) {
         let t = Instant::now();
         match udp.recv_from(&mut buffer) {
             
             Ok((size, _)) => {
-               
+                end_timeout_count = 0;
                  recv_time += t.elapsed();
 
                 if size < 16 {
@@ -69,9 +70,23 @@ while running.load(Ordering::Acquire) {
                     u32::from_be_bytes(
                         buffer[0..4].try_into()?
                     );
-               
+               if chunk_id == 7992
+    || chunk_id == 9858
+    || chunk_id == 12726
+    || chunk_id == 13284
+{
+    println!("Receiver got retransmitted chunk {}", chunk_id);
+}
+                
 
- 
+                // END packet
+                // END packet
+if chunk_id == u32::MAX {
+
+    println!("END packet received.");
+
+    continue;
+}
                 let encrypted_size =
                     u32::from_be_bytes(
                         buffer[4..8].try_into()?
@@ -88,10 +103,8 @@ while running.load(Ordering::Acquire) {
               if chunk_id < received.len() as u32 {
 
     received[chunk_id as usize]
-    .store(true, Ordering::Release);
-    const DEBUG: bool = false;
-
-if DEBUG && chunk_id % 100 == 0 {
+        .store(true, Ordering::Relaxed);
+    if chunk_id % 100 == 0 {
     println!("Received chunk {}", chunk_id);
 }
         
@@ -141,19 +154,40 @@ fn worker_thread(
                 packet.chunk_id,
             );
 
-      let hash =
-    crate::checksum::chunk_hash(&decrypted);
+       let hash =
+    crate::checksum::chunk_hash(
+        &decrypted
+    );
+
+// Debug only for the problematic chunks
+if packet.chunk_id == 7992
+    || packet.chunk_id == 9858
+    || packet.chunk_id == 12726
+    || packet.chunk_id == 13284
+{
+    println!("Worker processing chunk {}", packet.chunk_id);
+}
 
 if hash != packet.hash {
+
+    if packet.chunk_id == 7992
+        || packet.chunk_id == 9858
+        || packet.chunk_id == 12726
+        || packet.chunk_id == 13284
+    {
+        println!("Hash mismatch for chunk {}", packet.chunk_id);
+    }
+
     continue;
 }
 
-tx.send(
-    DecryptedChunk {
-        chunk_id: packet.chunk_id,
-        data: decrypted,
+        tx.send(
+            DecryptedChunk {
+                chunk_id: packet.chunk_id,
+                data: decrypted,
+            }
+        )?;
     }
-)?;    }
 
     println!("Worker finished.");
 
@@ -245,7 +279,7 @@ fn find_missing(
         .enumerate()
         .filter_map(|(i, ok)| {
 
-            if !ok.load(Ordering::Acquire) {
+            if !ok.load(Ordering::Relaxed) {
                 Some(i as u32)
 
             } else {
@@ -269,21 +303,15 @@ pub fn run() -> Result<()> {
     use std::time::Duration;
 
 udp.set_read_timeout(
-    Some(Duration::from_millis(1))
+    Some(Duration::from_millis(100))
 )?;
     use socket2::Socket;
 
-let socket = Socket::from(udp.try_clone()?);
+    let socket = Socket::from(udp.try_clone()?);
 
-socket.set_recv_buffer_size(64 * 1024 * 1024)?;
+    socket.set_recv_buffer_size(64 * 1024 * 1024)?;
 
-// Print the actual receive buffer size Windows gave us
-println!(
-    "Actual recv buffer: {} bytes",
-    socket.recv_buffer_size()?
-);
-
-println!("Receiver bound to {}", udp.local_addr()?);
+    println!("Receiver bound to {}", udp.local_addr()?);
     println!("Waiting for UDP...");
 
     println!("Receiver UDP: {}", udp.local_addr()?);
@@ -388,10 +416,11 @@ println!(
     );
 
 let start = Instant::now();
-const PIPELINE_DEPTH: usize = 512;
 
 let (packet_tx, packet_rx) = unbounded();
 let (write_tx, write_rx) = unbounded();
+
+
 // Receiver thread
 
 let received = Arc::new(
@@ -405,9 +434,8 @@ let running = Arc::new(AtomicBool::new(true));
 // Worker threads
 let mut workers = Vec::new();
 
-println!("Using {} decryption workers", NUM_WORKERS);
-
 for _ in 0..NUM_WORKERS {
+
     let rx = packet_rx.clone();
 
     let tx = write_tx.clone();

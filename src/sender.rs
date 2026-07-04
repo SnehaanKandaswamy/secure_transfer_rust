@@ -2,8 +2,6 @@ use anyhow::Result;
 use std::time::Instant;
 const INITIAL_TRANSFER_COMPLETE: u8 = 0xA1;
 const RETRANSMISSION_COMPLETE: u8 = 0xA2;
-const PACING_INTERVAL: u32 = 64;
-const PACING_DELAY_US: u64 = 200;
 use rand::{rngs::OsRng, RngCore};
 use std::collections::HashMap;
 use rsa::{
@@ -51,8 +49,6 @@ impl Sender {
 
         SockRef::from(&udp)
     .set_send_buffer_size(64 * 1024 * 1024)?;
-    let sock = socket2::SockRef::from(&udp);
-println!("Actual send buffer: {} bytes", sock.send_buffer_size()?);
         println!("Sender UDP: {}", udp.local_addr()?);
         udp.set_nonblocking(false)?;
 
@@ -111,49 +107,49 @@ println!("Actual send buffer: {} bytes", sock.send_buffer_size()?);
     tx: ChannelSender<EncryptedChunk>,
     key: [u8; 32],
     nonce: [u8; 16],) -> Result<()> {
-        let start = Instant::now();
-while let Ok(chunk) = rx.recv() {
 
-    let encrypted = crypto::encrypt_chunk(
-        &chunk.data,
-        &key,
-        &nonce,
-        chunk.chunk_id,
-    );
+    while let Ok(chunk) = rx.recv() {
 
-    let hash =
-        checksum::chunk_hash(&chunk.data);
+        let encrypted = crypto::encrypt_chunk(
+            &chunk.data,
+            &key,
+            &nonce,
+            chunk.chunk_id,
+        );
 
-    let mut packet =
-        Vec::with_capacity(16 + encrypted.len());
+        let hash =
+            checksum::chunk_hash(&chunk.data);
 
-    packet.extend_from_slice(
-        &chunk.chunk_id.to_be_bytes()
-    );
+        let mut packet =
+            Vec::with_capacity(16 + encrypted.len());
 
-    packet.extend_from_slice(
-        &(encrypted.len() as u32).to_be_bytes()
-    );
+        packet.extend_from_slice(
+            &chunk.chunk_id.to_be_bytes()
+        );
 
-    packet.extend_from_slice(
-        &hash.to_be_bytes()
-    );
+        packet.extend_from_slice(
+            &(encrypted.len() as u32).to_be_bytes()
+        );
 
-    packet.extend_from_slice(
-        &encrypted
-    );
+        packet.extend_from_slice(
+            &hash.to_be_bytes()
+        );
 
-    tx.send(
-        EncryptedChunk {
-            chunk_id: chunk.chunk_id,
-            packet,
-            bytes: chunk.data.len(),
-        }
-    )?;
+        packet.extend_from_slice(
+            &encrypted
+        );
+
+        tx.send(
+            EncryptedChunk {
+                chunk_id: chunk.chunk_id,
+                packet,
+                bytes: chunk.data.len(),
+            }
+        )?;
+    }
+    println!("Worker finished");
+    Ok(())
 }
-println!("Worker lifetime: {:.3?}", start.elapsed());
-println!("Worker finished");
-Ok(())}
 
 fn sender_thread(
     udp: UdpSocket,
@@ -166,12 +162,8 @@ fn sender_thread(
     HashMap::<u32, Vec<u8>>::new();
         let mut last_chunk = 0u32;
         let mut next_print: u64 = 500 * 1024 * 1024;
-       println!("Sender thread started");
-        let sender_start = Instant::now();
-let receiver_addr = format!("{}:{}", RECEIVER_IP, DATA_PORT);
-const DEBUG: bool = false;
-
-while let Ok(chunk) = rx.recv() {
+        println!("Sender thread started");
+        while let Ok(chunk) = rx.recv() {
 
     let chunk_id = chunk.chunk_id;
     let bytes = chunk.bytes;
@@ -181,8 +173,11 @@ while let Ok(chunk) = rx.recv() {
 
 udp.send_to(
     &packet,
-    &receiver_addr,
+    format!("{}:{}", RECEIVER_IP, DATA_PORT),
 )?;
+if chunk_id % 128 == 0 {
+    std::thread::yield_now();
+}
 
 send_time += t.elapsed();
 
@@ -190,8 +185,7 @@ send_time += t.elapsed();
         chunk_id,
         packet,
     );
-
-if DEBUG && chunk_id % 100 == 0 {
+    if chunk_id % 100 == 0 {
     println!("Sent chunk {}", chunk_id);
 }
 
@@ -209,12 +203,33 @@ if DEBUG && chunk_id % 100 == 0 {
 
         next_print += 500 * 1024 * 1024;
     }
-}   
-        println!("Sender thread total: {:.3?}", sender_start.elapsed());
+}
         println!("Sender channel closed");
 
-      
+        let mut end_packet = Vec::with_capacity(16);
 
+        end_packet.extend_from_slice(
+            &u32::MAX.to_be_bytes()
+        );
+
+        end_packet.extend_from_slice(
+      &(last_chunk + 1).to_be_bytes()
+        );
+
+        end_packet.extend_from_slice(
+            &bytes_sent.to_be_bytes()
+        );
+
+        let t = Instant::now();
+
+udp.send_to(
+    &end_packet,
+    format!("{}:{}", RECEIVER_IP, DATA_PORT),
+)?;
+
+send_time += t.elapsed();
+
+        println!("END packet sent.");
         println!("Total send_to() time: {:.3?}", send_time);
         Ok((bytes_sent, packet_cache))
     }
@@ -262,10 +277,9 @@ if DEBUG && chunk_id % 100 == 0 {
 
     println!("Opening file...");
 
-const PIPELINE_DEPTH: usize = 512;
-
     let (read_tx, read_rx) = unbounded();
     let (send_tx, send_rx) = unbounded();
+
     let filename = self.filename.clone();
 
     let key = self.session_key;
@@ -281,25 +295,29 @@ const PIPELINE_DEPTH: usize = 512;
         )
     });
 
-  let mut workers = Vec::new();
+    // Workers
+    let mut workers = Vec::new();
 
-println!("Using {} encryption workers", NUM_WORKERS);
+    for _ in 0..NUM_WORKERS {
 
-for _ in 0..NUM_WORKERS  {
-   let rx = read_rx.clone();
-let tx = send_tx.clone();
+        let rx = read_rx.clone();
 
-workers.push(
-    std::thread::spawn(move || {
-        Self::worker_thread(
-            rx,
-            tx,
-            key,
-            nonce,
-        )
-    })
-);
-}
+        let tx = send_tx.clone();
+
+        let key = key;
+        let nonce = nonce;
+
+        workers.push(
+            std::thread::spawn(move || {
+                Self::worker_thread(
+                    rx,
+                    tx,
+                    key,
+                    nonce,
+                )
+            })
+        );
+    }
 
     drop(send_tx);
 
