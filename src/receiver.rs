@@ -41,6 +41,7 @@ fn receiver_thread(
     tx: ChannelSender<ReceivedPacket>,
     received: Arc<Vec<AtomicBool>>,
     running: Arc<AtomicBool>,
+    initial_transfer_done: Arc<AtomicBool>,
 ) -> Result<()>{
    
     use std::{
@@ -72,9 +73,15 @@ while running.load(Ordering::Acquire) {
                 
 
                 // END packet
-                if chunk_id == u32::MAX {
+                // END packet
+if chunk_id == u32::MAX {
 
     println!("END packet received.");
+
+    initial_transfer_done.store(
+        true,
+        Ordering::Release,
+    );
 
     continue;
 }
@@ -399,7 +406,8 @@ let received = Arc::new(
         .collect::<Vec<_>>()
 );
 let running = Arc::new(AtomicBool::new(true));
-
+let initial_transfer_done =
+    Arc::new(AtomicBool::new(false));
 // Worker threads
 let mut workers = Vec::new();
 
@@ -428,7 +436,15 @@ for _ in 0..NUM_WORKERS {
 drop(write_tx);
 
 let receive_start = Instant::now();
+println!("Waiting for initial transfer to finish...");
 
+while !initial_transfer_done.load(Ordering::Acquire) {
+    std::thread::sleep(
+        std::time::Duration::from_millis(1)
+    );
+}
+
+println!("Initial transfer finished.");
 let mut round = 1;
 
 // ---------- Spawn ONE UDP receiver thread ----------
@@ -441,6 +457,9 @@ let received_flags = received.clone();
 
 let running_clone = running.clone();
 
+let initial_done =
+    initial_transfer_done.clone();
+
 let receiver_handle = std::thread::spawn(move || {
 
     receiver_thread(
@@ -448,6 +467,7 @@ let receiver_handle = std::thread::spawn(move || {
         packet_sender,
         received_flags,
         running_clone,
+        initial_done,
     )
 });
 
@@ -498,11 +518,13 @@ println!("Requesting retransmission...");
 stream.write_all(&(missing.len() as u32).to_be_bytes())?;
 
 // Send each missing chunk ID
+// Send each missing chunk ID
 for id in &missing {
 
     stream.write_all(&id.to_be_bytes())?;
 }
 
+stream.flush()?;
 round += 1;
 }
 drop(packet_tx);   // <-- ADD IT HERE
