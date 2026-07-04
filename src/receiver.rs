@@ -35,7 +35,7 @@ use crate::config::{
     HOST,
     KEY_PORT,
 };
-
+const INITIAL_TRANSFER_COMPLETE: u8 = 0xA1;
 fn receiver_thread(
     udp: UdpSocket,
     tx: ChannelSender<ReceivedPacket>,
@@ -471,7 +471,16 @@ let writer_handle =
             expected_chunks,
         )
     });
+// Wait until sender has completed the initial UDP transfer
+let mut signal = [0u8; 1];
+stream.read_exact(&mut signal)?;
 
+if signal[0] != INITIAL_TRANSFER_COMPLETE {
+    anyhow::bail!("Invalid synchronization message");
+}
+
+// Allow any in-flight UDP packets to arrive
+std::thread::sleep(std::time::Duration::from_millis(50));
 loop {
 
     println!();

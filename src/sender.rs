@@ -36,7 +36,7 @@ pub struct Sender {
 
     filename: String,
 }
-
+const INITIAL_TRANSFER_COMPLETE: u8 = 0xA1;
 impl Sender {
     pub fn new(filename: &str) -> Result<Self> {
         let tcp = TcpStream::connect(
@@ -445,6 +445,10 @@ println!(
     "Initial transfer : {:.3?}",
     transfer_start.elapsed()
 );
+
+// Tell receiver the initial UDP transfer is finished
+self.tcp.write_all(&[INITIAL_TRANSFER_COMPLETE])?;
+self.tcp.flush()?;
 
 // Measure retransmission
 let retrans_start = Instant::now();
