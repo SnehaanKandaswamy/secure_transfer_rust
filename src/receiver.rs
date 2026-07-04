@@ -68,7 +68,12 @@ while running.load(Ordering::Acquire) {
                     u32::from_be_bytes(
                         buffer[0..4].try_into()?
                     );
-                 
+                 if chunk_id == 93
+    || chunk_id == 99
+    || chunk_id == 101
+{
+    println!("Receiver got chunk {}", chunk_id);
+}
                 
 
                 // END packet
