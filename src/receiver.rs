@@ -32,7 +32,7 @@ use crossbeam_channel::{
     Sender as ChannelSender,
 };
 use crate::config::{
-    CHUNK_SIZE,
+   
     DATA_PORT,
     HOST,
     KEY_PORT,
@@ -58,7 +58,7 @@ while running.load(Ordering::Acquire) {
         match udp.recv_from(&mut buffer) {
             
             Ok((size, _)) => {
-                end_timeout_count = 0;
+               
                  recv_time += t.elapsed();
 
                 if size < 16 {
@@ -141,21 +141,19 @@ fn worker_thread(
                 packet.chunk_id,
             );
 
-       let hash =
-    crate::checksum::chunk_hash(
-        &decrypted
-    );
+      let hash =
+    crate::checksum::chunk_hash(&decrypted);
 
-// Debug only for the problematic chunks
+if hash != packet.hash {
+    continue;
+}
 
-
-        tx.send(
-            DecryptedChunk {
-                chunk_id: packet.chunk_id,
-                data: decrypted,
-            }
-        )?;
+tx.send(
+    DecryptedChunk {
+        chunk_id: packet.chunk_id,
+        data: decrypted,
     }
+)?;    }
 
     println!("Worker finished.");
 
@@ -407,7 +405,7 @@ let running = Arc::new(AtomicBool::new(true));
 // Worker threads
 let mut workers = Vec::new();
 
-for _ in 0..NUM_WORKERS() {
+for _ in 0..NUM_WORKERS{
     let rx = packet_rx.clone();
 
     let tx = write_tx.clone();

@@ -111,50 +111,49 @@ println!("Actual send buffer: {} bytes", sock.send_buffer_size()?);
     tx: ChannelSender<EncryptedChunk>,
     key: [u8; 32],
     nonce: [u8; 16],) -> Result<()> {
+while let Ok(chunk) = rx.recv() {
 
-    while let Ok(chunk) = rx.recv() {
+    let encrypted = crypto::encrypt_chunk(
+        &chunk.data,
+        &key,
+        &nonce,
+        chunk.chunk_id,
+    );
 
-        let encrypted = crypto::encrypt_chunk(
-            &chunk.data,
-            &key,
-            &nonce,
-            chunk.chunk_id,
-        );
+    let hash =
+        checksum::chunk_hash(&chunk.data);
 
-        let hash =
-            checksum::chunk_hash(&chunk.data);
+    let mut packet =
+        Vec::with_capacity(16 + encrypted.len());
 
-        let mut packet =
-            Vec::with_capacity(16 + encrypted.len());
+    packet.extend_from_slice(
+        &chunk.chunk_id.to_be_bytes()
+    );
 
-        packet.extend_from_slice(
-            &chunk.chunk_id.to_be_bytes()
-        );
+    packet.extend_from_slice(
+        &(encrypted.len() as u32).to_be_bytes()
+    );
 
-        packet.extend_from_slice(
-            &(encrypted.len() as u32).to_be_bytes()
-        );
+    packet.extend_from_slice(
+        &hash.to_be_bytes()
+    );
 
-        packet.extend_from_slice(
-            &hash.to_be_bytes()
-        );
+    packet.extend_from_slice(
+        &encrypted
+    );
 
-        packet.extend_from_slice(
-            &encrypted
-        );
-
-        tx.send(
-            EncryptedChunk {
-                chunk_id: chunk.chunk_id,
-                packet,
-                bytes: chunk.data.len(),
-            }
-        )?;
-    }
-    println!("Worker finished");
-    Ok(())
+    tx.send(
+        EncryptedChunk {
+            chunk_id: chunk.chunk_id,
+            packet,
+            bytes: chunk.data.len(),
+        }
+    )?;
 }
 
+println!("Worker finished");
+Ok(())
+    }
 fn sender_thread(
     udp: UdpSocket,
     rx: Receiver<EncryptedChunk>,
@@ -179,10 +178,7 @@ udp.send_to(
     &packet,
     format!("{}:{}", RECEIVER_IP, DATA_PORT),
 )?;
-udp.send_to(
-    &packet,
-    format!("{}:{}", RECEIVER_IP, DATA_PORT),
-)?;
+
 
 send_time += t.elapsed();
 
@@ -262,7 +258,6 @@ if DEBUG && chunk_id % 100 == 0 {
 
     println!("Opening file...");
 
-    use crossbeam_channel::bounded;
 
 let (read_tx, read_rx) = bounded(512);
 let (send_tx, send_rx) = bounded(512);
@@ -284,7 +279,7 @@ let (send_tx, send_rx) = bounded(512);
     // Workers
     let mut workers = Vec::new();
 
-for _ in 0..NUM_WORKERS() {
+for _ in 0..NUM_WORKERS {
         let rx = read_rx.clone();
 
         let tx = send_tx.clone();
