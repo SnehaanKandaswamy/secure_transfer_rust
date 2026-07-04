@@ -1,5 +1,10 @@
-pub const NUM_WORKERS: usize = 4;
-pub struct ReadChunk {
+use std::thread;
+
+pub fn worker_count() -> usize {
+    thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+}pub struct ReadChunk {
     pub chunk_id: u32,
     pub data: Vec<u8>,
 }

@@ -24,7 +24,7 @@ use std::{
 use crate::pipeline::{
     ReceivedPacket,
     DecryptedChunk,
-    NUM_WORKERS,
+    worker_count,
 };
 use crossbeam_channel::{
     bounded,
@@ -404,8 +404,11 @@ let running = Arc::new(AtomicBool::new(true));
    
 // Worker threads
 let mut workers = Vec::new();
+let worker_count = worker_count();
 
-for _ in 0..NUM_WORKERS{
+println!("Using {} decryption workers", worker_count);
+
+for _ in 0..worker_count {
     let rx = packet_rx.clone();
 
     let tx = write_tx.clone();
