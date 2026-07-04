@@ -273,7 +273,7 @@ pub fn run() -> Result<()> {
     use std::time::Duration;
 
 udp.set_read_timeout(
-    Some(Duration::from_millis(1))
+    Some(Duration::from_millis(100))
 )?;
     use socket2::Socket;
 
