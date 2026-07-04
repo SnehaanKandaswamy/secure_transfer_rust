@@ -3,7 +3,6 @@ use std::time::Instant;
 const INITIAL_TRANSFER_COMPLETE: u8 = 0xA1;
 const RETRANSMISSION_COMPLETE: u8 = 0xA2;
 use rand::{rngs::OsRng, RngCore};
-use std::collections::HashMap;
 use rsa::{
     pkcs8::DecodePublicKey,
     Oaep,
@@ -45,6 +44,7 @@ impl Sender {
         )?;
 
         let udp = UdpSocket::bind("0.0.0.0:0")?;
+        udp.connect(format!("{}:{}", RECEIVER_IP, DATA_PORT))?;
         use socket2::SockRef;
 
         SockRef::from(&udp)
@@ -171,10 +171,7 @@ fn sender_thread(
 
     let t = Instant::now();
 
-udp.send_to(
-    &packet,
-    format!("{}:{}", RECEIVER_IP, DATA_PORT),
-)?;
+udp.send(&packet)?;
 
 
 send_time += t.elapsed();
@@ -348,10 +345,7 @@ fn retransmission_loop(
 
            if let Some(packet) = packet_cache.get(chunk_id as usize) {
                 if !packet.is_empty() {
-                    self.udp.send_to(
-                        packet,
-                        format!("{}:{}", RECEIVER_IP, DATA_PORT),
-                    )?;
+                    udp.send(&packet)?;
                 }
             }
             else {
