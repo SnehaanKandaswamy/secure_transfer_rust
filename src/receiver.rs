@@ -388,9 +388,10 @@ println!(
     );
 
 let start = Instant::now();
-let (packet_tx, packet_rx) = bounded(512);
-let (write_tx, write_rx) = bounded(512);
+const PIPELINE_DEPTH: usize = 512;
 
+let (packet_tx, packet_rx) = bounded(PIPELINE_DEPTH);
+let (write_tx, write_rx) = bounded(PIPELINE_DEPTH);
 
 // Receiver thread
 
@@ -405,7 +406,9 @@ let running = Arc::new(AtomicBool::new(true));
 // Worker threads
 let mut workers = Vec::new();
 
-for _ in 0..NUM_WORKERS{
+println!("Using {} decryption workers", NUM_WORKERS);
+
+for _ in 0..NUM_WORKERS {
     let rx = packet_rx.clone();
 
     let tx = write_tx.clone();
