@@ -152,8 +152,8 @@ while let Ok(chunk) = rx.recv() {
 }
 
 println!("Worker finished");
-Ok(())}
-
+Ok(())
+    }
 fn sender_thread(
     udp: UdpSocket,
     rx: Receiver<EncryptedChunk>,
@@ -165,12 +165,8 @@ fn sender_thread(
     HashMap::<u32, Vec<u8>>::new();
         let mut last_chunk = 0u32;
         let mut next_print: u64 = 500 * 1024 * 1024;
-       println!("Sender thread started");
-
-let receiver_addr = format!("{}:{}", RECEIVER_IP, DATA_PORT);
-const DEBUG: bool = false;
-
-while let Ok(chunk) = rx.recv() {
+        println!("Sender thread started");
+        while let Ok(chunk) = rx.recv() {
 
     let chunk_id = chunk.chunk_id;
     let bytes = chunk.bytes;
@@ -180,8 +176,9 @@ while let Ok(chunk) = rx.recv() {
 
 udp.send_to(
     &packet,
-    &receiver_addr,
+    format!("{}:{}", RECEIVER_IP, DATA_PORT),
 )?;
+
 
 send_time += t.elapsed();
 
@@ -189,6 +186,7 @@ send_time += t.elapsed();
         chunk_id,
         packet,
     );
+   const DEBUG: bool = false;
 
 if DEBUG && chunk_id % 100 == 0 {
     println!("Sent chunk {}", chunk_id);
@@ -260,10 +258,9 @@ if DEBUG && chunk_id % 100 == 0 {
 
     println!("Opening file...");
 
-const PIPELINE_DEPTH: usize = 512;
 
-let (read_tx, read_rx) = bounded(PIPELINE_DEPTH);
-let (send_tx, send_rx) = bounded(PIPELINE_DEPTH);
+let (read_tx, read_rx) = bounded(512);
+let (send_tx, send_rx) = bounded(512);
     let filename = self.filename.clone();
 
     let key = self.session_key;
@@ -279,25 +276,28 @@ let (send_tx, send_rx) = bounded(PIPELINE_DEPTH);
         )
     });
 
-  let mut workers = Vec::new();
+    // Workers
+    let mut workers = Vec::new();
 
-println!("Using {} encryption workers", NUM_WORKERS);
+for _ in 0..NUM_WORKERS {
+        let rx = read_rx.clone();
 
-for _ in 0..NUM_WORKERS  {
-   let rx = read_rx.clone();
-let tx = send_tx.clone();
+        let tx = send_tx.clone();
 
-workers.push(
-    std::thread::spawn(move || {
-        Self::worker_thread(
-            rx,
-            tx,
-            key,
-            nonce,
-        )
-    })
-);
-}
+        let key = key;
+        let nonce = nonce;
+
+        workers.push(
+            std::thread::spawn(move || {
+                Self::worker_thread(
+                    rx,
+                    tx,
+                    key,
+                    nonce,
+                )
+            })
+        );
+    }
 
     drop(send_tx);
 
