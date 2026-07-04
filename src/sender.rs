@@ -1,9 +1,9 @@
 use anyhow::Result;
 use std::time::Instant;
-use std::sync::{Arc, Mutex};
 const INITIAL_TRANSFER_COMPLETE: u8 = 0xA1;
 const RETRANSMISSION_COMPLETE: u8 = 0xA2;
 use rand::{rngs::OsRng, RngCore};
+use std::collections::HashMap;
 use rsa::{
     pkcs8::DecodePublicKey,
     Oaep,
@@ -45,7 +45,7 @@ impl Sender {
         )?;
 
         let udp = UdpSocket::bind("0.0.0.0:0")?;
-        udp.connect(format!("{}:{}", RECEIVER_IP, DATA_PORT))?;
+udp.connect(format!("{}:{}", RECEIVER_IP, DATA_PORT))?;
         use socket2::SockRef;
 
         SockRef::from(&udp)
@@ -155,11 +155,12 @@ impl Sender {
 fn sender_thread(
     udp: UdpSocket,
     rx: Receiver<EncryptedChunk>,
-    packet_cache: Arc<Vec<Mutex<Vec<u8>>>>,
-) -> Result<u64>{
+    total_chunks: usize,
+) -> Result<(u64, Vec<Vec<u8>>)>{
 
         let mut bytes_sent: u64 = 0;
         let mut send_time = std::time::Duration::ZERO;
+        let mut packet_cache = vec![Vec::new(); total_chunks];
         let mut last_chunk = 0u32;
         let mut next_print: u64 = 500 * 1024 * 1024;
         println!("Sender thread started");
@@ -173,17 +174,9 @@ fn sender_thread(
 
 udp.send(&packet)?;
 
-
 send_time += t.elapsed();
 
-    {
-    let mut slot =
-        packet_cache[chunk_id as usize]
-            .lock()
-            .unwrap();
-
-    *slot = packet.clone();
-}
+    packet_cache[chunk_id as usize] = packet;
    
 
     bytes_sent += bytes as u64;
@@ -205,7 +198,7 @@ send_time += t.elapsed();
 
       
         println!("Total send_to() time: {:.3?}", send_time);
-        Ok(bytes_sent)
+        Ok((bytes_sent, packet_cache))
     }
     fn handshake(&mut self) -> Result<()> {
         println!("Waiting for receiver public key...");
@@ -248,7 +241,7 @@ send_time += t.elapsed();
    fn send_file(
     &mut self,
     total_chunks: usize,
-) ->Result<(u64, Arc<Vec<Mutex<Vec<u8>>>>)> {
+) -> Result<(u64, Vec<Vec<u8>>)> {
 
     println!("Opening file...");
 
@@ -261,11 +254,6 @@ send_time += t.elapsed();
     let nonce = self.nonce;
 
     let udp = self.udp.try_clone()?;
-    let packet_cache = Arc::new(
-    (0..total_chunks)
-        .map(|_| Mutex::new(Vec::new()))
-        .collect::<Vec<_>>()
-);
 
     // Reader
     let reader = std::thread::spawn(move || {
@@ -302,16 +290,14 @@ send_time += t.elapsed();
     drop(send_tx);
 
     // Sender
-    let sender_cache = Arc::clone(&packet_cache);
-
-let sender =
-    std::thread::spawn(move || {
-        Self::sender_thread(
-            udp,
-            send_rx,
-            sender_cache,
-        )
-    });
+    let sender =
+        std::thread::spawn(move || {
+            Self::sender_thread(
+                udp,
+                send_rx,
+                total_chunks,
+            )
+        });
 
     reader.join().unwrap()?;
 
@@ -319,16 +305,14 @@ let sender =
         worker.join().unwrap()?;
     }
 
-let bytes_sent = sender.join().unwrap()?;
-
-Ok((bytes_sent, packet_cache))
+    sender.join().unwrap()
 }
 
    
 
 fn retransmission_loop(
     &mut self,
-    packet_cache: Arc<Vec<Mutex<Vec<u8>>>>,
+    packet_cache: &[Vec<u8>],
 ) -> Result<()> { 
 
     loop {
@@ -359,14 +343,11 @@ fn retransmission_loop(
             let chunk_id =
                 u32::from_be_bytes(id_buf);
 
-           if let Some(slot) = packet_cache.get(chunk_id as usize) {
-
-    let packet = slot.lock().unwrap();
-
-    if !packet.is_empty() {
-        self.udp.send(&packet)?;
-    }
-}
+           if let Some(packet) = packet_cache.get(chunk_id as usize) {
+                if !packet.is_empty() {
+                    self.udp.send(packet)?;
+                }
+            }
             else {
 
                 println!(
@@ -425,7 +406,7 @@ self.tcp.flush()?;
 let retrans_start = Instant::now();
 
 self.retransmission_loop(
-    packet_cache,
+    &packet_cache,
 )?;
 
 println!(
