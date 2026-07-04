@@ -4,7 +4,6 @@ const INITIAL_TRANSFER_COMPLETE: u8 = 0xA1;
 const RETRANSMISSION_COMPLETE: u8 = 0xA2;
 use std::time::Instant;
 
-use socket2::SockRef;
 use rand::rngs::OsRng;
 use std::sync::{
     Arc,
@@ -132,7 +131,6 @@ println!(
 );
 
 Ok(())
-    Ok(())
 }
 fn worker_thread(
     rx: Receiver<ReceivedPacket>,
@@ -297,12 +295,7 @@ udp.set_read_timeout(
 
     println!("Receiver bound to {}", udp.local_addr()?);
     println!("Waiting for UDP...");
-    let sock = SockRef::from(&udp);
 
-println!(
-    "Receive buffer: {} MB",
-    sock.recv_buffer_size()? / (1024 * 1024)
-);  
     println!("Receiver UDP: {}", udp.local_addr()?);
     
     println!("Waiting for UDP packet...");
