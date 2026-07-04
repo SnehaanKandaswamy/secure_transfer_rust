@@ -1,10 +1,10 @@
 pub const HOST: &str = "0.0.0.0";
-pub const RECEIVER_IP: &str = "192.168.31.1";
+pub const RECEIVER_IP: &str = "192.168.31.120";
 pub const DATA_PORT: u16 = 5000;
 
 pub const KEY_PORT: u16 = 5001;
 
-pub const CHUNK_SIZE: usize = 16384;
+pub const CHUNK_SIZE: usize = 65000;
 
 pub const NUM_WORKERS: usize = 4;
 
