@@ -24,7 +24,7 @@ use std::{
 use crate::pipeline::{
     ReceivedPacket,
     DecryptedChunk,
-    worker_count,
+    NUM_WORKERS,
 };
 use crossbeam_channel::{
     bounded,
@@ -437,7 +437,7 @@ let running = Arc::new(AtomicBool::new(true));
 // Worker threads
 let mut workers = Vec::new();
 
-for _ in 0..worker_count() {
+for _ in 0..NUM_WORKERS() {
     let rx = packet_rx.clone();
 
     let tx = write_tx.clone();
