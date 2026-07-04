@@ -3,6 +3,8 @@ use anyhow::Result;
 const INITIAL_TRANSFER_COMPLETE: u8 = 0xA1;
 const RETRANSMISSION_COMPLETE: u8 = 0xA2;
 use std::time::Instant;
+
+use socket2::SockRef;
 use rand::rngs::OsRng;
 use std::sync::{
     Arc,
@@ -50,10 +52,11 @@ fn receiver_thread(
         convert::TryInto,
         io::ErrorKind,
     };
-
+   
     let mut buffer = vec![0u8; 70000];
     let mut recv_time = std::time::Duration::ZERO;
-   
+    let mut recv_time = std::time::Duration::ZERO;
+let mut send_time = std::time::Duration::ZERO;
 while running.load(Ordering::Acquire) {
         let t = Instant::now();
         match udp.recv_from(&mut buffer) {
@@ -92,15 +95,19 @@ while running.load(Ordering::Acquire) {
 
         
 }
+    
+               let s = Instant::now();
 
-                tx.send(
-                    ReceivedPacket {
-                        chunk_id,
-                        encrypted: buffer[16..16 + encrypted_size]
-                            .to_vec(),
-                        hash,
-                    }
-                )?;
+tx.send(
+    ReceivedPacket {
+        chunk_id,
+        encrypted: buffer[16..16 + encrypted_size]
+            .to_vec(),
+        hash,
+    }
+)?;
+
+send_time += s.elapsed();
             }
           Err(ref e)
 if e.kind() == ErrorKind::TimedOut
@@ -118,6 +125,13 @@ if e.kind() == ErrorKind::TimedOut
     "Total recv_from() time: {:.3?}",
     recv_time
 );
+
+println!(
+    "Total tx.send() time: {:.3?}",
+    send_time
+);
+
+Ok(())
     Ok(())
 }
 fn worker_thread(
@@ -288,7 +302,7 @@ udp.set_read_timeout(
 println!(
     "Receive buffer: {} MB",
     sock.recv_buffer_size()? / (1024 * 1024)
-);  s
+);  
     println!("Receiver UDP: {}", udp.local_addr()?);
     
     println!("Waiting for UDP packet...");
