@@ -388,8 +388,10 @@ println!(
     );
 
 let start = Instant::now();
-let (packet_tx, packet_rx) = bounded(512);
-let (write_tx, write_rx) = bounded(512);
+const PIPELINE_DEPTH: usize = 4096;
+
+let (read_tx, read_rx) = bounded(PIPELINE_DEPTH);
+let (send_tx, send_rx) = bounded(PIPELINE_DEPTH);
 
 
 // Receiver thread
