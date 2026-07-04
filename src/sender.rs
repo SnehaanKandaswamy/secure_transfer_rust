@@ -357,10 +357,12 @@ fn retransmission_loop(
             if let Some(packet) =
                 packet_cache.get(&chunk_id)
             {
-                self.udp.send_to(
-                    packet,
-                    format!("{}:{}", RECEIVER_IP, DATA_PORT),
-                )?;
+               let receiver_addr = format!("{}:{}", RECEIVER_IP, DATA_PORT);
+
+while let Ok(chunk) = rx.recv() {
+    ...
+    udp.send_to(&packet, &receiver_addr)?;
+}
             }
             else {
 
