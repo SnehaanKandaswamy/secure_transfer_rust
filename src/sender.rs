@@ -260,7 +260,7 @@ if DEBUG && chunk_id % 100 == 0 {
 
     println!("Opening file...");
 
-const PIPELINE_DEPTH: usize = 4096;
+const PIPELINE_DEPTH: usize = 512;
 
 let (read_tx, read_rx) = bounded(PIPELINE_DEPTH);
 let (send_tx, send_rx) = bounded(PIPELINE_DEPTH);

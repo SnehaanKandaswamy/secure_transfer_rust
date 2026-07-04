@@ -388,7 +388,7 @@ println!(
     );
 
 let start = Instant::now();
-const PIPELINE_DEPTH: usize = 4096;
+const PIPELINE_DEPTH: usize = 512;
 
 let (packet_tx, packet_rx) = bounded(PIPELINE_DEPTH);
 let (write_tx, write_rx) = bounded(PIPELINE_DEPTH);
