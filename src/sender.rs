@@ -29,7 +29,7 @@ use crossbeam_channel::{bounded, Receiver, Sender as ChannelSender};
 use crate::pipeline::{
     ReadChunk,
     EncryptedChunk,
-    worker_count,
+    NUM_WORKERS,
 };
 pub struct Sender {
     tcp: TcpStream,
@@ -279,13 +279,11 @@ let (send_tx, send_rx) = bounded(PIPELINE_DEPTH);
         )
     });
 
-    // Workers
-    let mut workers = Vec::new();
-let worker_count = worker_count();
+  let mut workers = Vec::new();
 
-println!("Using {} encryption workers", worker_count);
+println!("Using {} encryption workers", NUM_WORKERS);
 
-for _ in 0..worker_count {
+for _ in 0..NUM_WORKERS  {
    let rx = read_rx.clone();
 let tx = send_tx.clone();
 
