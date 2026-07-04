@@ -154,12 +154,12 @@ impl Sender {
 fn sender_thread(
     udp: UdpSocket,
     rx: Receiver<EncryptedChunk>,
-) -> Result<(u64, HashMap<u32, Vec<u8>>)> {
+    total_chunks: usize,
+) -> Result<(u64, Vec<Vec<u8>>)>{
 
         let mut bytes_sent: u64 = 0;
         let mut send_time = std::time::Duration::ZERO;
-        let mut packet_cache =
-    HashMap::<u32, Vec<u8>>::new();
+        let mut packet_cache = vec![Vec::new(); total_chunks];
         let mut last_chunk = 0u32;
         let mut next_print: u64 = 500 * 1024 * 1024;
         println!("Sender thread started");
@@ -179,10 +179,7 @@ udp.send_to(
 
 send_time += t.elapsed();
 
-    packet_cache.insert(
-        chunk_id,
-        packet,
-    );
+    packet_cache[chunk_id as usize] = packet;
    
 
     bytes_sent += bytes as u64;
@@ -244,9 +241,10 @@ send_time += t.elapsed();
         println!("Handshake complete.");
         Ok(())
     }
-    fn send_file(
+   fn send_file(
     &mut self,
-) -> Result<(u64, HashMap<u32, Vec<u8>>)> {
+    total_chunks: usize,
+) -> Result<(u64, Vec<Vec<u8>>)> {
 
     println!("Opening file...");
 
@@ -300,6 +298,7 @@ send_time += t.elapsed();
             Self::sender_thread(
                 udp,
                 send_rx,
+                total_chunks,
             )
         });
 
@@ -316,7 +315,7 @@ send_time += t.elapsed();
 
 fn retransmission_loop(
     &mut self,
-    packet_cache: &HashMap<u32, Vec<u8>>,
+    packet_cache: &[Vec<u8>],
 ) -> Result<()> { 
 
     loop {
@@ -347,13 +346,13 @@ fn retransmission_loop(
             let chunk_id =
                 u32::from_be_bytes(id_buf);
 
-            if let Some(packet) =
-                packet_cache.get(&chunk_id)
-            {
-                self.udp.send_to(
-                    packet,
-                    format!("{}:{}", RECEIVER_IP, DATA_PORT),
-                )?;
+           if let Some(packet) = packet_cache.get(chunk_id as usize) {
+                if !packet.is_empty() {
+                    self.udp.send_to(
+                        packet,
+                        format!("{}:{}", RECEIVER_IP, DATA_PORT),
+                    )?;
+                }
             }
             else {
 
@@ -398,7 +397,7 @@ self.tcp.flush()?;
 let transfer_start = Instant::now();
 
 let (bytes_sent, packet_cache) =
-    self.send_file()?;
+    self.send_file(total_chunks as usize)?;
 
 println!(
     "Initial transfer : {:.3?}",
