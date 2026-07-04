@@ -283,7 +283,12 @@ udp.set_read_timeout(
 
     println!("Receiver bound to {}", udp.local_addr()?);
     println!("Waiting for UDP...");
+    let sock = SockRef::from(&udp);
 
+println!(
+    "Receive buffer: {} MB",
+    sock.recv_buffer_size()? / (1024 * 1024)
+);  s
     println!("Receiver UDP: {}", udp.local_addr()?);
     
     println!("Waiting for UDP packet...");
