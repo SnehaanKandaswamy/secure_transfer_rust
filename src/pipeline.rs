@@ -13,7 +13,7 @@ pub struct EncryptedChunk {
 pub struct ReceivedPacket {
     pub chunk_id: u32,
     pub encrypted: Vec<u8>,
-    pub hash: u64,
+    pub hash:    u64,
 }
 
 pub struct DecryptedChunk {
