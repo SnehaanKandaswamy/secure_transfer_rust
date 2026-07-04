@@ -264,8 +264,8 @@ if DEBUG && chunk_id % 100 == 0 {
 
 const PIPELINE_DEPTH: usize = 512;
 
-let (read_tx, read_rx) = bounded(PIPELINE_DEPTH);
-let (send_tx, send_rx) = bounded(PIPELINE_DEPTH);
+let (read_tx, read_rx) = unbounded();
+let (send_tx, send_rx) = unbounded();
     let filename = self.filename.clone();
 
     let key = self.session_key;
