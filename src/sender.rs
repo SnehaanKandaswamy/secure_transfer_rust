@@ -392,24 +392,9 @@ fn retransmission_loop(
 
         println!("Retransmission round complete.");
 
-        let mut end_packet = Vec::with_capacity(16);
-
-        end_packet.extend_from_slice(
-            &u32::MAX.to_be_bytes()
-        );
-
-        end_packet.extend_from_slice(
-            &0u32.to_be_bytes()
-        );
-
-        end_packet.extend_from_slice(
-            &0u64.to_be_bytes()
-        );
-
-        self.udp.send_to(
-            &end_packet,
-            format!("{}:{}", RECEIVER_IP, DATA_PORT),
-        )?;
+// Tell receiver this retransmission round is finished
+self.tcp.write_all(&[RETRANSMISSION_COMPLETE])?;
+self.tcp.flush()?;
     }
 
     Ok(())

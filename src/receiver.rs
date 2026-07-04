@@ -35,7 +35,7 @@ use crate::config::{
     HOST,
     KEY_PORT,
 };
-const INITIAL_TRANSFER_COMPLETE: u8 = 0xA1;
+const INITIAL_TRANSFER_COMPLETE: u8 = 0xA2;
 fn receiver_thread(
     udp: UdpSocket,
     tx: ChannelSender<ReceivedPacket>,
@@ -543,8 +543,15 @@ for id in &missing {
 }
 
 stream.flush()?;
-round += 1;
+// Wait until sender has finished retransmitting
+let mut signal = [0u8; 1];
+stream.read_exact(&mut signal)?;
+
+if signal[0] != RETRANSMISSION_COMPLETE {
+    anyhow::bail!("Expected retransmission complete");
 }
+
+round += 1;}
 drop(packet_tx);   // <-- ADD IT HERE
 receiver_handle.join().unwrap()?;
 println!(
