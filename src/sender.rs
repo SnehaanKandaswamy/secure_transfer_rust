@@ -47,7 +47,7 @@ impl Sender {
         use socket2::SockRef;
 
         SockRef::from(&udp)
-    .set_send_buffer_size(64 * 1024 * 1024)?;
+    .set_send_buffer_size(128 * 1024 * 1024)?;
         println!("Sender UDP: {}", udp.local_addr()?);
         udp.set_nonblocking(false)?;
 
@@ -174,11 +174,7 @@ udp.send_to(
     &packet,
     format!("{}:{}", RECEIVER_IP, DATA_PORT),
 )?;
-if chunk_id % 32 == 0 {
-    std::thread::sleep(
-        std::time::Duration::from_micros(200)
-    );
-}
+
 send_time += t.elapsed();
 
     packet_cache.insert(
