@@ -6,7 +6,7 @@ pub const KEY_PORT: u16 = 5001;
 
 pub const CHUNK_SIZE: usize = 65000;
 
-pub const NUM_WORKERS: usize = 8;
+pub const NUM_WORKERS: usize = 4;
 
 pub const UDP_SEND_BUFFER: usize = 16 * 1024 * 1024;
 
