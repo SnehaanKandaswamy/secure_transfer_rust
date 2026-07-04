@@ -88,7 +88,7 @@ while running.load(Ordering::Acquire) {
               if chunk_id < received.len() as u32 {
 
     received[chunk_id as usize]
-        .store(true, Ordering::Relaxed);
+    .store(true, Ordering::Release);
     const DEBUG: bool = false;
 
 if DEBUG && chunk_id % 100 == 0 {
@@ -245,7 +245,7 @@ fn find_missing(
         .enumerate()
         .filter_map(|(i, ok)| {
 
-            if !ok.load(Ordering::Relaxed) {
+            if !ok.load(Ordering::Acquire) {
                 Some(i as u32)
 
             } else {
