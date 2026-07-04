@@ -51,6 +51,8 @@ impl Sender {
 
         SockRef::from(&udp)
     .set_send_buffer_size(64 * 1024 * 1024)?;
+    let sock = socket2::SockRef::from(&udp);
+println!("Actual send buffer: {} bytes", sock.send_buffer_size()?);
         println!("Sender UDP: {}", udp.local_addr()?);
         udp.set_nonblocking(false)?;
 
@@ -177,11 +179,10 @@ udp.send_to(
     &packet,
     format!("{}:{}", RECEIVER_IP, DATA_PORT),
 )?;
-if chunk_id % PACING_INTERVAL == 0 {
-    std::thread::sleep(
-        std::time::Duration::from_micros(PACING_DELAY_US),
-    );
-}
+udp.send_to(
+    &packet,
+    format!("{}:{}", RECEIVER_IP, DATA_PORT),
+)?;
 
 send_time += t.elapsed();
 

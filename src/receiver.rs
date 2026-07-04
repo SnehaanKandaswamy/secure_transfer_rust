@@ -305,11 +305,17 @@ udp.set_read_timeout(
 )?;
     use socket2::Socket;
 
-    let socket = Socket::from(udp.try_clone()?);
+let socket = Socket::from(udp.try_clone()?);
 
-    socket.set_recv_buffer_size(64 * 1024 * 1024)?;
+socket.set_recv_buffer_size(64 * 1024 * 1024)?;
 
-    println!("Receiver bound to {}", udp.local_addr()?);
+// Print the actual receive buffer size Windows gave us
+println!(
+    "Actual recv buffer: {} bytes",
+    socket.recv_buffer_size()?
+);
+
+println!("Receiver bound to {}", udp.local_addr()?);
     println!("Waiting for UDP...");
 
     println!("Receiver UDP: {}", udp.local_addr()?);
