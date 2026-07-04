@@ -345,7 +345,7 @@ fn retransmission_loop(
 
            if let Some(packet) = packet_cache.get(chunk_id as usize) {
                 if !packet.is_empty() {
-                    udp.send(&packet)?;
+                    self.udp.send(&packet)?;
                 }
             }
             else {
