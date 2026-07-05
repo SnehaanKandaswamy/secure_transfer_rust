@@ -26,61 +26,31 @@ fn build_counter(
 }
 
 pub fn encrypt_chunk(
+    data: &mut [u8],
+    key: &[u8; 32],
+    nonce: &[u8; 16],
+    chunk_id: u32,
+) {
+    let counter = build_counter(nonce, chunk_id);
 
-    data:&[u8],
-
-    key:&[u8;32],
-
-    nonce:&[u8;16],
-
-    chunk_id:u32,
-
-)->Vec<u8>{
-
-    let counter=
-        build_counter(
-            nonce,
-            chunk_id
-        );
-
-    let mut cipher=
-        AesCtr::new(
-            key.into(),
-            &counter.into()
-        );
-
-    let mut output=data.to_vec();
-
-    cipher.apply_keystream(
-        &mut output
+    let mut cipher = AesCtr::new(
+        key.into(),
+        &counter.into(),
     );
 
-    output
-
+    cipher.apply_keystream(data);
 }
-
 pub fn decrypt_chunk(
-
-    encrypted:&[u8],
-
-    key:&[u8;32],
-
-    nonce:&[u8;16],
-
-    chunk_id:u32,
-
-)->Vec<u8>{
-
+    data: &mut [u8],
+    key: &[u8; 32],
+    nonce: &[u8; 16],
+    chunk_id: u32,
+) {
+    // AES-CTR decrypt == encrypt
     encrypt_chunk(
-
-        encrypted,
-
+        data,
         key,
-
         nonce,
-
         chunk_id,
-
-    )
-
+    );
 }

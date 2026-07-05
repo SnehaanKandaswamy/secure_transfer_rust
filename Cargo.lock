@@ -491,6 +491,7 @@ dependencies = [
  "bytes",
  "crossbeam",
  "crossbeam-channel",
+ "crossbeam-queue",
  "ctr",
  "memmap2",
  "num_cpus",

@@ -165,39 +165,32 @@ fn worker_thread(
 
     while let Ok(packet) = rx.recv() {
 
-        let decrypted =
-            crate::crypto::decrypt_chunk(
-                &packet.encrypted,
-                &session_key,
-                &nonce,
-                packet.chunk_id,
-            );
+       let mut decrypted = packet.encrypted;
 
-       let hash =
-    crate::checksum::chunk_hash(
-        &decrypted
-    );
+crate::crypto::decrypt_chunk(
+    &mut decrypted,
+    &session_key,
+    &nonce,
+    packet.chunk_id,
+);
 
-
+let hash = crate::checksum::chunk_hash(&decrypted);
 
 if hash != packet.hash {
-
-   
-
     continue;
 }
 
-        tx.send(
-            DecryptedChunk {
-                chunk_id: packet.chunk_id,
-                data: decrypted,
-            }
-        )?;
+tx.send(
+    DecryptedChunk {
+        chunk_id: packet.chunk_id,
+        data: decrypted,
     }
-
+)?;
+    }
     println!("Worker finished.");
 
     Ok(())
+
 }
 fn writer_thread(
     rx: Receiver<DecryptedChunk>,
