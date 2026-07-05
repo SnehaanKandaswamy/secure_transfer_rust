@@ -344,6 +344,9 @@ udp.set_read_timeout(
     println!("Connected to {}", addr);
     println!("Connected to {}", addr);
 
+
+
+    //---------------- RSA ----------------//
 println!("1");
 let private = RsaPrivateKey::new(&mut OsRng, 2048)?;
 println!("2");
@@ -354,41 +357,17 @@ println!("3");
 let pem = public.to_public_key_pem(Default::default())?;
 println!("4");
 
+println!("Sending public key length...");
 stream.write_all(&(pem.len() as u32).to_be_bytes())?;
 println!("5");
 
+println!("Sending public key...");
 stream.write_all(pem.as_bytes())?;
+stream.flush()?;
 println!("6");
 
-let mut len = [0u8; 4];
-println!("7");
 
-stream.read_exact(&mut len)?;
-println!("8");
-
-    //---------------- RSA ----------------//
-
-    let private =
-        RsaPrivateKey::new(
-            &mut OsRng,
-            2048,
-        )?;
-
-    let public =
-        RsaPublicKey::from(&private);
-
-    let pem =
-        public.to_public_key_pem(
-            Default::default()
-        )?;
-
-    stream.write_all(
-        &(pem.len() as u32).to_be_bytes()
-    )?;
-
-    stream.write_all(
-        pem.as_bytes()
-    )?;
+println!("Public key sent.");
 
     //---------------- Receive AES Key ----------------//
 
