@@ -1,3 +1,4 @@
+//BEST
 pub const NUM_WORKERS: usize = 4;
 
 pub struct ReadChunk {

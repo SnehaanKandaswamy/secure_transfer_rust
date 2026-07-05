@@ -1,4 +1,4 @@
-//Basic
+//BEST
 use anyhow::Result;
 use std::time::Instant;
 const INITIAL_TRANSFER_COMPLETE: u8 = 0xA1;
