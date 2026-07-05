@@ -527,19 +527,16 @@ if missing.is_empty() {
 
     break;
 }
-
 println!("Requesting retransmission...");
 
-let batch_size =
-    missing.len().min(RETRANSMIT_BATCH_SIZE);
+// Send number of missing chunks
+stream.write_all(&(missing.len() as u32).to_be_bytes())?;
 
-stream.write_all(
-    &(batch_size as u32).to_be_bytes()
-)?;
-
-for id in missing.iter().take(batch_size) {
+// Send every missing chunk ID
+for id in &missing {
     stream.write_all(&id.to_be_bytes())?;
 }
+
 stream.flush()?;
 // Wait until sender has finished retransmitting
 let mut signal = [0u8; 1];
