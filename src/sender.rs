@@ -219,10 +219,9 @@ while transport.can_send() {
     packets_sent += 1;
 
     transport.mark_sent(
-        chunk_id,
-        packet.clone(),
-        bytes,
-    );
+    chunk_id,
+    bytes,
+);
 
     send_time += t.elapsed();
 

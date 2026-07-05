@@ -5,11 +5,9 @@ use std::{
 use crate::config::WINDOW_SIZE;
 
 pub struct InFlightPacket {
-    pub packet: Vec<u8>,
     pub bytes: usize,
     pub sent_at: Instant,
 }
-
 pub struct TransportState {
 
     // First packet not yet acknowledged
@@ -65,13 +63,11 @@ pub fn can_send(&self) -> bool {
 pub fn mark_sent(
     &mut self,
     chunk_id: u32,
-    packet: Vec<u8>,
     bytes: usize,
 ) {
     self.inflight.insert(
         chunk_id,
         InFlightPacket {
-            packet,
             bytes,
             sent_at: Instant::now(),
         },
