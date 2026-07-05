@@ -227,7 +227,12 @@ while transport.can_send() {
 
     udp.send(&packet)?;
     packets_sent += 1;
+    const BURST_SIZE: u64 = 256;
+const BURST_DELAY_US: u64 = 150;
 
+if packets_sent % BURST_SIZE == 0 {
+    std::thread::sleep(std::time::Duration::from_micros(BURST_DELAY_US));
+}
     transport.mark_sent(
     chunk_id,
     bytes,
