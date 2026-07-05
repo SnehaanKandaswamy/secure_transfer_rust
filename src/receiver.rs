@@ -308,7 +308,7 @@ pub fn run() -> Result<()> {
     let udp = UdpSocket::bind(
     format!("{}:{}", HOST, DATA_PORT)
 )?;
-
+udp.set_read_timeout(Some(Duration::from_millis(100)))?;
     use std::time::Duration;
 
 
@@ -564,14 +564,16 @@ if signal[0] != RETRANSMISSION_COMPLETE {
 }
 
 round += 1;}
+println!("Dropping packet_tx");
 drop(packet_tx);   // <-- ADD IT HERE
 receiver_handle.join().unwrap()?;
+println!("Receiver joined");
 println!(
     "Receive rounds  : {:.3?}",
     receive_start.elapsed()
 );
 let worker_start = Instant::now();
-
+println!("Joining workers");
 // Wait for workers
 for worker in workers {
     worker.join().unwrap()?;
