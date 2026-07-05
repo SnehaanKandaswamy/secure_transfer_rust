@@ -321,13 +321,6 @@ pub fn run() -> Result<()> {
     format!("{}:{}", HOST, DATA_PORT)
 )?;
 
-println!("Waiting for ONE UDP packet...");
-
-let mut buf = [0u8; 65535];
-
-let (n, addr) = udp.recv_from(&mut buf)?;
-
-println!("Received {} bytes from {}", n, addr);  
     use std::time::Duration;
 
 
