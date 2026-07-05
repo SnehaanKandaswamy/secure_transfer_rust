@@ -94,8 +94,6 @@ let mut total_bytes = 0u64;
         let bytes = file.read(&mut buffer)?;
         total_bytes += bytes as u64;
         
-        let reader_start = Instant::now();
-let mut total_bytes = 0u64;
         if bytes == 0 {
             break;
         }
