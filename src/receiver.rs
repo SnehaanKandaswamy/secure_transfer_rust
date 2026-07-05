@@ -63,9 +63,6 @@ while running.load(Ordering::Acquire) {
         match udp.recv_from(&mut buffer) {
             
             Ok((size, _)) => {
-                if packets == 0 {
-    println!("Receiver: first UDP packet arrived");
-}
                  recv_time += t.elapsed();
                  packets += 1;
 
@@ -168,32 +165,39 @@ fn worker_thread(
 
     while let Ok(packet) = rx.recv() {
 
-       let mut decrypted = packet.encrypted;
+        let decrypted =
+            crate::crypto::decrypt_chunk(
+                &packet.encrypted,
+                &session_key,
+                &nonce,
+                packet.chunk_id,
+            );
 
-crate::crypto::decrypt_chunk(
-    &mut decrypted,
-    &session_key,
-    &nonce,
-    packet.chunk_id,
-);
+       let hash =
+    crate::checksum::chunk_hash(
+        &decrypted
+    );
 
-let hash = crate::checksum::chunk_hash(&decrypted);
+
 
 if hash != packet.hash {
+
+   
+
     continue;
 }
 
-tx.send(
-    DecryptedChunk {
-        chunk_id: packet.chunk_id,
-        data: decrypted,
+        tx.send(
+            DecryptedChunk {
+                chunk_id: packet.chunk_id,
+                data: decrypted,
+            }
+        )?;
     }
-)?;
-    }
+
     println!("Worker finished.");
 
     Ok(())
-
 }
 fn writer_thread(
     rx: Receiver<DecryptedChunk>,
@@ -500,15 +504,8 @@ let writer_handle =
         )
     });
 // Wait until sender has completed the initial UDP transfer
-println!("RECEIVER: waiting for INITIAL_TRANSFER_COMPLETE");
-
 let mut signal = [0u8; 1];
 stream.read_exact(&mut signal)?;
-
-println!(
-    "RECEIVER: got signal = 0x{:02X}",
-    signal[0]
-);
 
 if signal[0] != INITIAL_TRANSFER_COMPLETE {
     anyhow::bail!("Invalid synchronization message");

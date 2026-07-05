@@ -77,57 +77,45 @@ udp.connect(format!("{}:{}", RECEIVER_IP, DATA_PORT))?;
     fn reader_thread(
     filename: String,
     tx: ChannelSender<ReadChunk>,
-) -> Result<()> {
+        ) -> Result<()> {
+
     use std::fs::File;
     use std::io::Read;
-    use std::mem;
 
     let mut file = File::open(filename)?;
-
-    let reader_start = Instant::now();
-    let mut total_bytes = 0u64;
+let reader_start = Instant::now();
+let mut total_bytes = 0u64;
     let mut chunk_id = 0u32;
 
-    // One reusable buffer
-    let mut buffer = vec![0u8; CHUNK_SIZE];
-
     loop {
+
+        let mut buffer = vec![0u8; CHUNK_SIZE];
+
         let bytes = file.read(&mut buffer)?;
         total_bytes += bytes as u64;
-
+        
         if bytes == 0 {
             break;
         }
 
         buffer.truncate(bytes);
 
-        // Move the filled buffer into the chunk
-        let mut chunk_buffer = Vec::new();
-        mem::swap(&mut chunk_buffer, &mut buffer);
-
-        tx.send(ReadChunk {
-            chunk_id,
-            data: chunk_buffer,
-        })?;
-
-        // Recover the allocation for the next read
-        if buffer.capacity() < CHUNK_SIZE {
-            buffer = Vec::with_capacity(CHUNK_SIZE);
-        }
-
-        buffer.resize(CHUNK_SIZE, 0);
+        tx.send(
+            ReadChunk {
+                chunk_id,
+                data: buffer,
+            }
+        )?;
 
         chunk_id += 1;
     }
-
-    println!(
-        "Reader finished: {:.3?} ({:.2} MB)",
-        reader_start.elapsed(),
-        total_bytes as f64 / 1024.0 / 1024.0
-    );
-
-    Ok(())
-}
+        println!(
+    "Reader finished: {:.3?} ({:.2} MB)",
+    reader_start.elapsed(),
+    total_bytes as f64 / 1024.0 / 1024.0
+);
+        Ok(())
+    }
     fn worker_thread(
     rx: Receiver<ReadChunk>,
     tx: ChannelSender<EncryptedChunk>,
@@ -140,41 +128,43 @@ let mut chunks = 0u64;
     while let Ok(chunk) = rx.recv() {
         let t = Instant::now();
 
-let mut data = chunk.data;
-
-// Hash BEFORE encryption
-let hash = checksum::chunk_hash(&data);
-
-crypto::encrypt_chunk(
-    &mut data,
+let encrypted = crypto::encrypt_chunk(
+    &chunk.data,
     &key,
     &nonce,
     chunk.chunk_id,
 );
+
 encrypt_time += t.elapsed();
 chunks += 1;
+
+        let hash =
+            checksum::chunk_hash(&chunk.data);
+
         let mut packet =
-            Vec::with_capacity(16 + data.len());
+            Vec::with_capacity(16 + encrypted.len());
 
         packet.extend_from_slice(
             &chunk.chunk_id.to_be_bytes()
         );
 
         packet.extend_from_slice(
-            &(data.len() as u32).to_be_bytes()
+            &(encrypted.len() as u32).to_be_bytes()
         );
 
         packet.extend_from_slice(
             &hash.to_be_bytes()
         );
 
-        packet.extend_from_slice(&data);
+        packet.extend_from_slice(
+            &encrypted
+        );
 
         tx.send(
             EncryptedChunk {
                 chunk_id: chunk.chunk_id,
                 packet,
-                bytes: data.len(),
+                bytes: chunk.data.len(),
             }
         )?;
     }
@@ -223,35 +213,11 @@ while transport.can_send() {
         break;
     };
 
+    let t = Instant::now();
 
-if packet.len() != 16 + bytes {
-    println!(
-        "Unexpected packet size: chunk_id={}, packet.len()={}, expected={}",
-        chunk_id,
-        packet.len(),
-        16 + bytes
-    );
-}
-let t = Instant::now();
+    udp.send(&packet)?;
+    packets_sent += 1;
 
-match udp.send(&packet) {
-    Ok(_) => {
-        packets_sent += 1;
-
-        
-    }
-    Err(e) => {
-        println!(
-            "send() failed: chunk_id={}, packet_len={}, bytes={}, error={:?}",
-            chunk_id,
-            packet.len(),
-            bytes,
-            e
-        );
-
-        return Err(e.into());
-    }
-}
     transport.mark_sent(
     chunk_id,
     bytes,
@@ -496,7 +462,6 @@ println!(
 
 // Tell receiver the initial UDP transfer is finished
 self.tcp.write_all(&[INITIAL_TRANSFER_COMPLETE])?;
-println!("Sender: INITIAL_TRANSFER_COMPLETE sent");
 self.tcp.flush()?;
 
 // Measure retransmission
