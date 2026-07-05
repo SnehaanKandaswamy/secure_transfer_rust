@@ -51,10 +51,11 @@ fn receiver_thread(
         convert::TryInto,
         io::ErrorKind,
     };
-   
+   let thread_start = Instant::now();
     let mut buffer = vec![0u8; 70000];
     let mut recv_time = std::time::Duration::ZERO;
-    let mut send_time = std::time::Duration::ZERO;
+    let mut packets = 0u64;
+let mut channel_time = Duration::ZERO;
     let mut highest_contiguous: u32 = 0;
 let mut last_ack_sent: u32 = 0;
 while running.load(Ordering::Acquire) {
@@ -63,8 +64,10 @@ while running.load(Ordering::Acquire) {
             
             Ok((size, _)) => {
                  recv_time += t.elapsed();
+                 packets += 1;
 
                 if size < 16 {
+                    
                     continue;
                 }
 
@@ -72,9 +75,7 @@ while running.load(Ordering::Acquire) {
                     u32::from_be_bytes(
                         buffer[0..4].try_into()?
                     );
-                if chunk_id >= 500 && chunk_id <= 520 {
-    println!("Received UDP chunk {}", chunk_id);
-}
+            
 
                 
 
@@ -120,7 +121,7 @@ tx.send(
     }
 )?;
 
-send_time += s.elapsed();
+channel_time += s.elapsed();
             }
           Err(ref e)
 if e.kind() == ErrorKind::TimedOut
@@ -138,10 +139,19 @@ if e.kind() == ErrorKind::TimedOut
     "Total recv_from() time: {:.3?}",
     recv_time
 );
+println!(
+    "Receiver thread lifetime: {:.3?}",
+    thread_start.elapsed()
+);
+println!("==============================");
+println!("Receiver UDP statistics");
+println!("Packets received : {}", packets);
+println!("recv_from() time : {:.3?}", recv_time);
+println!("==============================");
 
 println!(
     "Total tx.send() time: {:.3?}",
-    send_time
+    channel_time
 );
 
 Ok(())
@@ -261,7 +271,12 @@ while next_chunk < expected_chunks {
 );
 
     outfile.flush()?;
-
+    println!("==============================");
+println!("Writer statistics");
+println!("Chunks written : {}", chunks_written);
+println!("Bytes written  : {}", bytes);
+println!("Writer time    : {:.3?}", io_start.elapsed());
+println!("==============================");
     println!("Writer finished.");
 
     Ok((bytes,chunks_written))
@@ -286,7 +301,7 @@ fn find_missing(
         .collect()
 }
 pub fn run() -> Result<()> {
-
+    let overall_start = Instant::now();
     println!("==============================");
     println!(" Secure File Transfer Receiver");
     println!("==============================");
@@ -597,7 +612,10 @@ let throughput =
     bytes_received as f64
         / (1024.0 * 1024.0)
         / seconds;
-
+println!(
+    "Total receiver runtime: {:.3?}",
+    overall_start.elapsed()
+);
 println!();
 println!("==============================");
 println!("Transfer Complete");

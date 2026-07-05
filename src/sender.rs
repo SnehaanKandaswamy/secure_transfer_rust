@@ -90,7 +90,7 @@ udp.connect(format!("{}:{}", RECEIVER_IP, DATA_PORT))?;
         let mut buffer = vec![0u8; CHUNK_SIZE];
 
         let bytes = file.read(&mut buffer)?;
-
+        total_bytes += bytes as u64;
         if bytes == 0 {
             break;
         }
@@ -106,7 +106,11 @@ udp.connect(format!("{}:{}", RECEIVER_IP, DATA_PORT))?;
 
         chunk_id += 1;
     }
-        println!("Reader finished");
+        println!(
+    "Reader finished: {:.3?} ({:.2} MB)",
+    reader_start.elapsed(),
+    total_bytes as f64 / 1024.0 / 1024.0
+);
         Ok(())
     }
     fn worker_thread(
@@ -116,13 +120,17 @@ udp.connect(format!("{}:{}", RECEIVER_IP, DATA_PORT))?;
     nonce: [u8; 16],) -> Result<()> {
    
     while let Ok(chunk) = rx.recv() {
+        let t = Instant::now();
 
-        let encrypted = crypto::encrypt_chunk(
-            &chunk.data,
-            &key,
-            &nonce,
-            chunk.chunk_id,
-        );
+let encrypted = crypto::encrypt_chunk(
+    &chunk.data,
+    &key,
+    &nonce,
+    chunk.chunk_id,
+);
+
+encrypt_time += t.elapsed();
+chunks += 1;
 
         let hash =
             checksum::chunk_hash(&chunk.data);
@@ -154,6 +162,17 @@ udp.connect(format!("{}:{}", RECEIVER_IP, DATA_PORT))?;
             }
         )?;
     }
+    println!(
+    "Worker {:?}: {} chunks | encrypt {:?}",
+    std::thread::current().id(),
+    chunks,
+    encrypt_time
+);
+
+println!(
+    "Worker total lifetime: {:?}",
+    worker_start.elapsed()
+);
     println!("Worker finished");
     Ok(())
 }
@@ -166,6 +185,7 @@ fn sender_thread(
 
         let mut bytes_sent: u64 = 0;
         let mut send_time = std::time::Duration::ZERO;
+        let mut packets_sent = 0u64;
         let mut packet_cache = vec![Vec::new(); total_chunks];  
         let mut transport = TransportState::new();
         let mut last_chunk = 0u32;
@@ -190,6 +210,7 @@ while transport.can_send() {
     let t = Instant::now();
 
     udp.send(&packet)?;
+    packets_sent += 1;
 
     transport.mark_sent(
         chunk_id,
@@ -220,6 +241,11 @@ while transport.can_send() {
 
 println!("Sender channel closed");
       
+        println!("==============================");
+println!("Sender statistics");
+println!("Packets sent : {}", packets_sent);
+println!("send() time  : {:.3?}", send_time);
+println!("==============================");
         println!("Total send_to() time: {:.3?}", send_time);
         Ok((bytes_sent, packet_cache))
     }
@@ -338,7 +364,8 @@ fn retransmission_loop(
     &mut self,
     packet_cache: &[Vec<u8>],
 ) -> Result<()> { 
-
+    let retransmission_start = Instant::now();
+let mut retransmitted = 0u64;
     loop {
 
         let mut count_buf = [0u8; 4];
@@ -370,6 +397,7 @@ fn retransmission_loop(
            if let Some(packet) = packet_cache.get(chunk_id as usize) {
                 if !packet.is_empty() {
                     self.udp.send(packet)?;
+                    retransmitted += 1;
                 }
             }
             else {
@@ -387,11 +415,16 @@ fn retransmission_loop(
 self.tcp.write_all(&[RETRANSMISSION_COMPLETE])?;
 self.tcp.flush()?;
     }
+    println!(
+    "Retransmission phase: {:?} ({} packets)",
+    retransmission_start.elapsed(),
+    retransmitted
+);
 
     Ok(())
 }
    pub fn run(&mut self) -> Result<()> {
-
+    let start = Instant::now();
     println!("==============================");
     println!(" Secure File Transfer Sender");
     println!("==============================");
@@ -437,7 +470,10 @@ println!(
     "Retransmission   : {:.3?}",
     retrans_start.elapsed()
 );
-
+println!(
+    "Total sender runtime: {:.3?}",
+    start.elapsed()
+);
 // Total
 let elapsed = start.elapsed();
 let seconds = elapsed.as_secs_f64();
@@ -446,6 +482,7 @@ let throughput =
     bytes_sent as f64
         / (1024.0 * 1024.0)
         / seconds;
+
     println!();
     println!("==============================");
     println!("Transfer Complete");
