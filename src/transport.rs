@@ -60,7 +60,7 @@ pub fn next_pending(
     self.pending.pop_front()
 }
 pub fn can_send(&self) -> bool {
-    self.inflight.len() < WINDOW_SIZE
+    true
 }
 pub fn mark_sent(
     &mut self,
