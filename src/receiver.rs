@@ -65,14 +65,6 @@ while running.load(Ordering::Acquire) {
                  recv_time += t.elapsed();
                  packets += 1;
 
-if packets <= 10 {
-    println!(
-        "Packet {}: size={}, chunk_id={}",
-        packets,
-        size,
-        u32::from_be_bytes(buffer[0..4].try_into().unwrap())
-    );
-}
 
                 if size < 16 {
                     

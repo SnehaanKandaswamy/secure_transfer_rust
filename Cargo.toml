@@ -29,3 +29,5 @@ memmap2 = "0.9"
 
 
 num_cpus = "1.16"
+[profile.release]
+debug = true
