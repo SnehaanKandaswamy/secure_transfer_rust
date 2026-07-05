@@ -56,8 +56,7 @@ fn receiver_thread(
     let mut recv_time = std::time::Duration::ZERO;
     let mut packets = 0u64;
 let mut channel_time = Duration::ZERO;
-    let mut highest_contiguous: u32 = 0;
-let mut last_ack_sent: u32 = 0;
+
 while running.load(Ordering::Acquire) {
         let t = Instant::now();
         match udp.recv_from(&mut buffer) {
@@ -105,19 +104,12 @@ if packets <= 10 {
 
     received[chunk_id as usize]
         .store(true, Ordering::Release);
-    while (highest_contiguous as usize) < received.len()
-    && received[highest_contiguous as usize]
-        .load(Ordering::Acquire)
-{
-    highest_contiguous += 1;
-}
-        if highest_contiguous >= last_ack_sent + 128 {
-    last_ack_sent = highest_contiguous;
+  
 
     
     // Send cumulative ACK to sender.
 }
-}
+
     
                let s = Instant::now();
 
@@ -226,7 +218,7 @@ let file = OpenOptions::new()
 file.set_len(expected_bytes)?;
 
 let mut outfile = BufWriter::with_capacity(
-    8 * 1024 * 1024,
+    32 * 1024 * 1024,
     file,
 );
     let mut bytes = 0u64;
@@ -294,20 +286,16 @@ fn find_missing(
     received: &[AtomicBool]
 ) -> Vec<u32>
 {
-    received
-        .iter()
-        .enumerate()
-        .filter_map(|(i, ok)| {
+    let mut missing = Vec::with_capacity(4096);
 
-            if !ok.load(Ordering::Relaxed) {
-                Some(i as u32)
+for (i, ok) in received.iter().enumerate() {
+    if !ok.load(Ordering::Acquire) {
+        missing.push(i as u32);
+    }
+}
 
-            } else {
-
-                None
-            }
-        })
-        .collect()
+missing
+       
 }
 pub fn run() -> Result<()> {
     let overall_start = Instant::now();
@@ -438,8 +426,13 @@ println!(
 
 let start = Instant::now();
 
-let (packet_tx, packet_rx) = unbounded();
-let (write_tx, write_rx) = unbounded();
+use crossbeam_channel::bounded;
+
+let (packet_tx, packet_rx) =
+    bounded(4096);
+
+let (write_tx, write_rx) =
+    bounded(4096);
 
 
 // Receiver thread
@@ -484,7 +477,6 @@ let receive_start = Instant::now();
 let mut round = 1;
 
 // ---------- Spawn ONE UDP receiver thread ----------
-let control_stream = stream.try_clone()?;
 let udp_receiver = udp.try_clone()?;
 
 let packet_sender = packet_tx.clone();
