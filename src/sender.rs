@@ -223,15 +223,34 @@ while transport.can_send() {
         break;
     };
 
-    let t = Instant::now();
 
-    udp.send(&packet)?;
-    packets_sent += 1;
-    const BURST_SIZE: u64 = 256;
-const BURST_DELAY_US: u64 = 150;
+if packet.len() != 16 + bytes {
+    println!(
+        "Unexpected packet size: chunk_id={}, packet.len()={}, expected={}",
+        chunk_id,
+        packet.len(),
+        16 + bytes
+    );
+}
+let t = Instant::now();
 
-if packets_sent % BURST_SIZE == 0 {
-    std::thread::sleep(std::time::Duration::from_micros(BURST_DELAY_US));
+match udp.send(&packet) {
+    Ok(_) => {
+        packets_sent += 1;
+
+        
+    }
+    Err(e) => {
+        println!(
+            "send() failed: chunk_id={}, packet_len={}, bytes={}, error={:?}",
+            chunk_id,
+            packet.len(),
+            bytes,
+            e
+        );
+
+        return Err(e.into());
+    }
 }
     transport.mark_sent(
     chunk_id,
