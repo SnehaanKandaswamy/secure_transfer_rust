@@ -63,6 +63,9 @@ while running.load(Ordering::Acquire) {
         match udp.recv_from(&mut buffer) {
             
             Ok((size, _)) => {
+                if packets == 0 {
+    println!("Receiver: first UDP packet arrived");
+}
                  recv_time += t.elapsed();
                  packets += 1;
 
@@ -497,8 +500,15 @@ let writer_handle =
         )
     });
 // Wait until sender has completed the initial UDP transfer
+println!("RECEIVER: waiting for INITIAL_TRANSFER_COMPLETE");
+
 let mut signal = [0u8; 1];
 stream.read_exact(&mut signal)?;
+
+println!(
+    "RECEIVER: got signal = 0x{:02X}",
+    signal[0]
+);
 
 if signal[0] != INITIAL_TRANSFER_COMPLETE {
     anyhow::bail!("Invalid synchronization message");

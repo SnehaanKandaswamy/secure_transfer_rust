@@ -496,6 +496,7 @@ println!(
 
 // Tell receiver the initial UDP transfer is finished
 self.tcp.write_all(&[INITIAL_TRANSFER_COMPLETE])?;
+println!("Sender: INITIAL_TRANSFER_COMPLETE sent");
 self.tcp.flush()?;
 
 // Measure retransmission
