@@ -342,6 +342,29 @@ udp.set_read_timeout(
         listener.accept()?;
 
     println!("Connected to {}", addr);
+    println!("Connected to {}", addr);
+
+println!("1");
+let private = RsaPrivateKey::new(&mut OsRng, 2048)?;
+println!("2");
+
+let public = RsaPublicKey::from(&private);
+println!("3");
+
+let pem = public.to_public_key_pem(Default::default())?;
+println!("4");
+
+stream.write_all(&(pem.len() as u32).to_be_bytes())?;
+println!("5");
+
+stream.write_all(pem.as_bytes())?;
+println!("6");
+
+let mut len = [0u8; 4];
+println!("7");
+
+stream.read_exact(&mut len)?;
+println!("8");
 
     //---------------- RSA ----------------//
 
@@ -631,3 +654,4 @@ println!("Throughput  : {:.2} MB/s", throughput);
 
 Ok(())
 }
+
