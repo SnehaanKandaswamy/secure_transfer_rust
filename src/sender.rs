@@ -3,6 +3,7 @@ use anyhow::Result;
 use std::time::Instant;
 const INITIAL_TRANSFER_COMPLETE: u8 = 0xA1;
 const RETRANSMISSION_COMPLETE: u8 = 0xA2;
+use std::time::Duration;
 use rand::{rngs::OsRng, RngCore};
 use std::collections::HashMap;
 use rsa::{
@@ -82,7 +83,8 @@ udp.connect(format!("{}:{}", RECEIVER_IP, DATA_PORT))?;
     use std::io::Read;
 
     let mut file = File::open(filename)?;
-
+let reader_start = Instant::now();
+let mut total_bytes = 0u64;
     let mut chunk_id = 0u32;
 
     loop {
@@ -91,6 +93,9 @@ udp.connect(format!("{}:{}", RECEIVER_IP, DATA_PORT))?;
 
         let bytes = file.read(&mut buffer)?;
         total_bytes += bytes as u64;
+        
+        let reader_start = Instant::now();
+let mut total_bytes = 0u64;
         if bytes == 0 {
             break;
         }
@@ -118,6 +123,9 @@ udp.connect(format!("{}:{}", RECEIVER_IP, DATA_PORT))?;
     tx: ChannelSender<EncryptedChunk>,
     key: [u8; 32],
     nonce: [u8; 16],) -> Result<()> {
+        let worker_start = Instant::now();
+let mut encrypt_time = std::time::Duration::ZERO;
+let mut chunks = 0u64;
    
     while let Ok(chunk) = rx.recv() {
         let t = Instant::now();
