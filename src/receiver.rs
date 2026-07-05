@@ -418,13 +418,14 @@ println!(
 
 let start = Instant::now();
 
-use crossbeam_channel::bounded;
-
-let (packet_tx, packet_rx) =
-    bounded(4096);
-
-let (write_tx, write_rx) =
-    bounded(4096);
+// NOTE: switched back from bounded(4096) to unbounded().
+// bounded() made receiver_thread's tx.send() block whenever the
+// worker/writer stage fell behind (e.g. a disk write stall), which
+// stopped it from calling udp.recv_from() and let the OS UDP buffer
+// overflow -> massive burst packet loss. unbounded() removes that
+// backpressure so the UDP-draining thread never blocks.
+let (packet_tx, packet_rx) = unbounded();
+let (write_tx, write_rx) = unbounded();
 
 
 // Receiver thread
@@ -627,4 +628,3 @@ println!("Throughput  : {:.2} MB/s", throughput);
 
 Ok(())
 }
-
