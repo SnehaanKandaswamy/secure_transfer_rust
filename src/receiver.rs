@@ -34,18 +34,18 @@ use crossbeam_channel::{
     Sender as ChannelSender,
 };
 use crate::config::{
-    CHUNK_SIZE,
-    DATA_PORT,
     HOST,
+    DATA_PORT,
     KEY_PORT,
+    CHUNK_SIZE,
+    RETRANSMIT_BATCH_SIZE,
 };
-
 fn receiver_thread(
     udp: UdpSocket,
     tx: ChannelSender<ReceivedPacket>,
     received: Arc<Vec<AtomicBool>>,
     running: Arc<AtomicBool>,
-) -> Result<()>{
+) -> Result<()> {
    
     use std::{
         convert::TryInto,
@@ -54,8 +54,9 @@ fn receiver_thread(
    
     let mut buffer = vec![0u8; 70000];
     let mut recv_time = std::time::Duration::ZERO;
-    let mut recv_time = std::time::Duration::ZERO;
-let mut send_time = std::time::Duration::ZERO;
+    let mut send_time = std::time::Duration::ZERO;
+    let mut highest_contiguous: u32 = 0;
+let mut last_ack_sent: u32 = 0;
 while running.load(Ordering::Acquire) {
         let t = Instant::now();
         match udp.recv_from(&mut buffer) {
@@ -90,9 +91,22 @@ while running.load(Ordering::Acquire) {
               if chunk_id < received.len() as u32 {
 
     received[chunk_id as usize]
-        .store(true, Ordering::Relaxed);
+        .store(true, Ordering::Release);
+    while (highest_contiguous as usize) < received.len()
+    && received[highest_contiguous as usize]
+        .load(Ordering::Acquire)
+{
+    highest_contiguous += 1;
+}
+        if highest_contiguous >= last_ack_sent + 128 {
+    last_ack_sent = highest_contiguous;
 
-        
+    if highest_contiguous >= last_ack_sent + 128 {
+    last_ack_sent = highest_contiguous;
+
+}
+    // Send cumulative ACK to sender.
+}
 }
     
                let s = Instant::now();
@@ -445,7 +459,7 @@ let receive_start = Instant::now();
 let mut round = 1;
 
 // ---------- Spawn ONE UDP receiver thread ----------
-
+let control_stream = stream.try_clone()?;
 let udp_receiver = udp.try_clone()?;
 
 let packet_sender = packet_tx.clone();
@@ -456,12 +470,12 @@ let running_clone = running.clone();
 
 let receiver_handle = std::thread::spawn(move || {
 
-    receiver_thread(
-        udp_receiver,
-        packet_sender,
-        received_flags,
-        running_clone,
-    )
+receiver_thread(
+    udp_receiver,
+    packet_sender,
+    received_flags,
+    running_clone,
+)
 });
 
 // ---------- Writer thread ----------
@@ -516,16 +530,16 @@ if missing.is_empty() {
 
 println!("Requesting retransmission...");
 
-// Send number of missing chunks
-stream.write_all(&(missing.len() as u32).to_be_bytes())?;
+let batch_size =
+    missing.len().min(RETRANSMIT_BATCH_SIZE);
 
-// Send each missing chunk ID
-// Send each missing chunk ID
-for id in &missing {
+stream.write_all(
+    &(batch_size as u32).to_be_bytes()
+)?;
 
+for id in missing.iter().take(batch_size) {
     stream.write_all(&id.to_be_bytes())?;
 }
-
 stream.flush()?;
 // Wait until sender has finished retransmitting
 let mut signal = [0u8; 1];

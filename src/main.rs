@@ -9,7 +9,7 @@ mod receiver;
 mod pipeline;
 use anyhow::Result;
 use std::env;
-
+mod transport;
 use sender::Sender;
 
 fn main() -> Result<()> {

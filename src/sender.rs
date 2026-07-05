@@ -11,6 +11,10 @@ use rsa::{
     RsaPublicKey,
 };
 use sha2::Sha256;
+use std::collections::{
+    BTreeMap,
+    VecDeque,
+};
 
 use std::{
     io::{Read, Write},
@@ -19,7 +23,7 @@ use std::{
 
 use crate::{
     checksum,
-    config::{CHUNK_SIZE, DATA_PORT, RECEIVER_IP, KEY_PORT},
+    config::{CHUNK_SIZE, DATA_PORT, RECEIVER_IP, KEY_PORT,WINDOW_SIZE},
     crypto,
 };
 
@@ -39,6 +43,7 @@ pub struct Sender {
 
     filename: String,
 }
+use crate::transport::TransportState;
 impl Sender {
     pub fn new(filename: &str) -> Result<Self> {
         let tcp = TcpStream::connect(
@@ -109,7 +114,7 @@ udp.connect(format!("{}:{}", RECEIVER_IP, DATA_PORT))?;
     tx: ChannelSender<EncryptedChunk>,
     key: [u8; 32],
     nonce: [u8; 16],) -> Result<()> {
-
+   
     while let Ok(chunk) = rx.recv() {
 
         let encrypted = crypto::encrypt_chunk(
@@ -161,29 +166,46 @@ fn sender_thread(
 
         let mut bytes_sent: u64 = 0;
         let mut send_time = std::time::Duration::ZERO;
-        let mut packet_cache = vec![Vec::new(); total_chunks];
+        let mut packet_cache = vec![Vec::new(); total_chunks];  
+        let mut transport = TransportState::new();
         let mut last_chunk = 0u32;
         let mut next_print: u64 = 500 * 1024 * 1024;
         println!("Sender thread started");
-        while let Ok(chunk) = rx.recv() {
+       while let Ok(chunk) = rx.recv() {
 
-    let chunk_id = chunk.chunk_id;
-    let bytes = chunk.bytes;
-    let packet = chunk.packet;
+transport.queue_packet(
+    chunk.chunk_id,
+    chunk.packet,
+    chunk.bytes,
+);
+
+while transport.can_send() {
+
+    let Some((chunk_id, packet, bytes)) =
+        transport.next_pending()
+    else {
+        break;
+    };
 
     let t = Instant::now();
 
-udp.send(&packet)?;
+    udp.send(&packet)?;
 
-send_time += t.elapsed();
+    transport.mark_sent(
+        chunk_id,
+        packet.clone(),
+        bytes,
+    );
+
+    send_time += t.elapsed();
 
     packet_cache[chunk_id as usize] = packet;
-   
 
     bytes_sent += bytes as u64;
 
     last_chunk = last_chunk.max(chunk_id);
-
+}
+   
     if bytes_sent >= next_print {
 
         println!(
@@ -195,8 +217,8 @@ send_time += t.elapsed();
         next_print += 500 * 1024 * 1024;
     }
 }
-        println!("Sender channel closed");
 
+println!("Sender channel closed");
       
         println!("Total send_to() time: {:.3?}", send_time);
         Ok((bytes_sent, packet_cache))
@@ -245,9 +267,9 @@ send_time += t.elapsed();
 ) -> Result<(u64, Vec<Vec<u8>>)> {
 
     println!("Opening file...");
-
-    let (read_tx, read_rx) = unbounded();
-    let (send_tx, send_rx) = unbounded();
+   
+let (read_tx, read_rx) = unbounded();
+let (send_tx, send_rx) = unbounded();
 
     let filename = self.filename.clone();
 
@@ -255,6 +277,7 @@ send_time += t.elapsed();
     let nonce = self.nonce;
 
     let udp = self.udp.try_clone()?;
+    let mut control = self.tcp.try_clone()?;
 
     // Reader
     let reader = std::thread::spawn(move || {
@@ -289,15 +312,15 @@ send_time += t.elapsed();
     }
 
     drop(send_tx);
-
+    
     // Sender
     let sender =
         std::thread::spawn(move || {
             Self::sender_thread(
-                udp,
-                send_rx,
-                total_chunks,
-            )
+    udp,
+    send_rx,
+    total_chunks,
+)
         });
 
     reader.join().unwrap()?;
