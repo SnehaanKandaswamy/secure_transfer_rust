@@ -214,9 +214,8 @@ while transport.can_send() {
     };
 
     let t = Instant::now();
-    if chunk_id == 0 {
+        if chunk_id == 0 {
     println!("First packet size = {}", packet.len());
-}
     udp.send(&packet)?;
     packets_sent += 1;
 
