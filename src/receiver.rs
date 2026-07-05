@@ -72,6 +72,9 @@ while running.load(Ordering::Acquire) {
                     u32::from_be_bytes(
                         buffer[0..4].try_into()?
                     );
+                if chunk_id >= 500 && chunk_id <= 520 {
+    println!("Received UDP chunk {}", chunk_id);
+}
 
                 
 
@@ -101,10 +104,7 @@ while running.load(Ordering::Acquire) {
         if highest_contiguous >= last_ack_sent + 128 {
     last_ack_sent = highest_contiguous;
 
-    if highest_contiguous >= last_ack_sent + 128 {
-    last_ack_sent = highest_contiguous;
-
-}
+    
     // Send cumulative ACK to sender.
 }
 }
