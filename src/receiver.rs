@@ -46,7 +46,7 @@ fn receiver_thread(
     received: Arc<Vec<AtomicBool>>,
     running: Arc<AtomicBool>,
 ) -> Result<()> {
-   
+   println!("Receiver thread started");
     use std::{
         convert::TryInto,
         io::ErrorKind,
@@ -309,13 +309,19 @@ pub fn run() -> Result<()> {
 
 
     let udp = UdpSocket::bind(
-        format!("{}:{}", HOST, DATA_PORT)
-    )?;
+    format!("{}:{}", HOST, DATA_PORT)
+)?;
+
+println!("Waiting for ONE UDP packet...");
+
+let mut buf = [0u8; 65535];
+
+let (n, addr) = udp.recv_from(&mut buf)?;
+
+println!("Received {} bytes from {}", n, addr);x    
     use std::time::Duration;
 
-udp.set_read_timeout(
-    Some(Duration::from_millis(1))
-)?;
+
     use socket2::Socket;
 
     let socket = Socket::from(udp.try_clone()?);
