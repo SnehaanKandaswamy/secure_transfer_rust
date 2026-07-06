@@ -2,7 +2,6 @@
 use anyhow::Result;
 const INITIAL_TRANSFER_COMPLETE: u8 = 0xA1;
 const RETRANSMISSION_COMPLETE: u8 = 0xA2;
-const READY_FOR_SCAN: u8 = 0xA3;
 use std::time::Instant;
 use std::time::Duration;
 use rand::rngs::OsRng;
@@ -10,7 +9,6 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool,AtomicU32, Ordering},
 };
-
 use std::io::BufWriter;
 use rsa::{
     pkcs8::EncodePublicKey,
@@ -64,22 +62,14 @@ while running.load(Ordering::Acquire) {
         match udp.recv_from(&mut buffer) {
             
             Ok((size, _)) => {
-                
-recv_time += t.elapsed();
-packets += 1;
+                 recv_time += t.elapsed();
+                 packets += 1;
 
-if packets % 100 == 0 {
-    println!(
-        "recv_from packet {} (size {})",
-        packets,
-        size
-    );
-}
 
-if size < 16 {
-    continue;
-}
-
+                if size < 16 {
+                    
+                    continue;
+                }
 
                 let chunk_id =
                     u32::from_be_bytes(
@@ -300,8 +290,6 @@ missing
        
 }
 pub fn run() -> Result<()> {
-    
-println!("===== BUILD 2026-07-06 TEST =====");
     let overall_start = Instant::now();
     println!("==============================");
     println!(" Secure File Transfer Receiver");
@@ -321,11 +309,6 @@ udp.set_read_timeout(Some(Duration::from_millis(100)))?;
     let socket = Socket::from(udp.try_clone()?);
 
     socket.set_recv_buffer_size(64 * 1024 * 1024)?;
-    println!(
-    "Actual recv buffer = {}",
-    socket.recv_buffer_size()?
-);
-println!("Socket read timeout = {:?}", udp.read_timeout()?);
 
     println!("Receiver bound to {}", udp.local_addr()?);
     println!("Waiting for UDP...");
@@ -379,18 +362,16 @@ println!("Public key sent.");
     let mut len=[0u8;4];
 
 
-println!("Waiting for AES key length...");
-stream.read_exact(&mut len)?;
-println!("AES key length received.");
+    stream.read_exact(&mut len)?;
+
     let enc_len=
         u32::from_be_bytes(len) as usize;
 
     let mut encrypted=
         vec![0u8;enc_len];
 
-println!("Waiting for encrypted AES key...");
-stream.read_exact(&mut encrypted)?;
-println!("Encrypted AES key received.");
+    stream.read_exact(&mut encrypted)?;
+
     let session_key_vec =
     private.decrypt(
         Oaep::new::<Sha256>(),
@@ -404,9 +385,8 @@ println!("Encrypted AES key received.");
 
     let mut nonce=[0u8;16];
 
-println!("Waiting for nonce...");
-stream.read_exact(&mut nonce)?;
-println!("Nonce received.");
+    stream.read_exact(&mut nonce)?;
+
     println!("Handshake complete.");
     let mut chunk_buf = [0u8; 4];
 stream.read_exact(&mut chunk_buf)?;
@@ -489,135 +469,93 @@ let mut round = 1;
 let udp_receiver = udp.try_clone()?;
 
 let packet_sender = packet_tx.clone();
+
 let received_flags = received.clone();
+
 let running_clone = running.clone();
 
 let receiver_handle = std::thread::spawn(move || {
-    receiver_thread(
-        udp_receiver,
-        packet_sender,
-        received_flags,
-        running_clone,
-    )
+
+receiver_thread(
+    udp_receiver,
+    packet_sender,
+    received_flags,
+    running_clone,
+)
 });
 
 // ---------- Writer thread ----------
-let writer_handle = std::thread::spawn(move || {
-    writer_thread(
-        write_rx,
-        expected_bytes,
-        expected_chunks,
-    )
-});
 
-// ----------------------------------------------------
-// Wait until sender finishes the INITIAL transfer
-// ----------------------------------------------------
+let writer_handle =
+    std::thread::spawn(move || {
+        writer_thread(
+            write_rx,
+            expected_bytes,
+            expected_chunks,
+        )
+    });
+// Wait until sender has completed the initial UDP transfer
 let mut signal = [0u8; 1];
 stream.read_exact(&mut signal)?;
-
-println!("Received INITIAL_TRANSFER_COMPLETE");
 
 if signal[0] != INITIAL_TRANSFER_COMPLETE {
     anyhow::bail!("Invalid synchronization message");
 }
 
-// ----------------------------------------------------
-// Retransmission rounds
-// ----------------------------------------------------
+// Allow any in-flight UDP packets to arrive
+std::thread::sleep(std::time::Duration::from_millis(50));
 loop {
 
     println!();
     println!("========== Round {} ==========", round);
 
-    println!("Waiting for UDP to become quiet...");
+    
+    
+let missing = find_missing(&received);
 
-    let mut last_count = received
-        .iter()
-        .filter(|x| x.load(Ordering::Acquire))
-        .count();
+println!("Missing chunks: {}", missing.len());
 
-    let mut stable = 0;
-
-    loop {
-        std::thread::sleep(Duration::from_millis(200));
-
-        let count = received
-            .iter()
-            .filter(|x| x.load(Ordering::Acquire))
-            .count();
-
-        println!("Bitmap count = {}", count);
-
-        if count == last_count {
-            stable += 1;
-
-            if stable >= 3 {
-                break;
-            }
-        } else {
-            stable = 0;
-            last_count = count;
-        }
-    }
-
-    println!("Receiver ready.");
-
-    stream.write_all(&[READY_FOR_SCAN])?;
-    stream.flush()?;
-
-    println!("Scanning bitmap...");
-
-    let missing = find_missing(&received);
-
-    println!("Missing chunks: {}", missing.len());
-
-    if !missing.is_empty() {
-        println!(
-            "First few missing IDs: {:?}",
-            &missing[..missing.len().min(10)]
-        );
-    }
-
-    if missing.is_empty() {
-
-        println!("All chunks received.");
-
-        stream.write_all(&0u32.to_be_bytes())?;
-        stream.flush()?;
-
-        running.store(false, Ordering::Release);
-
-        break;
-    }
-
-    println!("Requesting retransmission...");
-
-    stream.write_all(&(missing.len() as u32).to_be_bytes())?;
-
-    for id in &missing {
-        stream.write_all(&id.to_be_bytes())?;
-    }
-
-    stream.flush()?;
-
-    // Wait until sender has completed this retransmission
-    let mut signal = [0u8; 1];
-    stream.read_exact(&mut signal)?;
-
-    if signal[0] != RETRANSMISSION_COMPLETE {
-        anyhow::bail!("Expected RETRANSMISSION_COMPLETE");
-    }
-
-    round += 1;
+if !missing.is_empty() {
+    println!(
+        "First few missing IDs: {:?}",
+        &missing[..missing.len().min(10)]
+    );
 }
 
+
+if missing.is_empty() {
+
+    println!("All chunks received.");
+
+    stream.write_all(&0u32.to_be_bytes())?;
+
+    running.store(false, Ordering::Release);
+
+    break;
+}
+println!("Requesting retransmission...");
+
+// Send number of missing chunks
+stream.write_all(&(missing.len() as u32).to_be_bytes())?;
+
+// Send every missing chunk ID
+for id in &missing {
+    stream.write_all(&id.to_be_bytes())?;
+}
+
+stream.flush()?;
+// Wait until sender has finished retransmitting
+let mut signal = [0u8; 1];
+stream.read_exact(&mut signal)?;
+
+if signal[0] != RETRANSMISSION_COMPLETE {
+    anyhow::bail!("Expected retransmission complete");
+}
+
+round += 1;}
 println!("Dropping packet_tx");
-
-drop(packet_tx);
-
+drop(packet_tx);   // <-- ADD IT HERE
 receiver_handle.join().unwrap()?;
-
 println!("Receiver joined");
 println!(
     "Receive rounds  : {:.3?}",

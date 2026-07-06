@@ -3,7 +3,6 @@ use anyhow::Result;
 use std::time::Instant;
 const INITIAL_TRANSFER_COMPLETE: u8 = 0xA1;
 const RETRANSMISSION_COMPLETE: u8 = 0xA2;
-const READY_FOR_SCAN: u8 = 0xA3;
 use std::time::Duration;
 use rand::{rngs::OsRng, RngCore};
 use std::collections::HashMap;
@@ -219,9 +218,6 @@ while transport.can_send() {
     println!("First packet size = {}", packet.len());
         }
     udp.send(&packet)?;
-    if packets_sent % 128 == 0 {
-    std::thread::sleep(std::time::Duration::from_micros(100));
-}
     packets_sent += 1;
 
     transport.mark_sent(
@@ -287,20 +283,15 @@ println!("==============================");
                 &self.session_key,
             )?;
 
-      println!("Sending AES key length...");
-self.tcp.write_all(&(encrypted.len() as u32).to_be_bytes())?;
-println!("AES key length sent.");
+        self.tcp.write_all(
+            &(encrypted.len() as u32).to_be_bytes(),
+        )?;
 
-println!("Sending AES key...");
-self.tcp.write_all(&encrypted)?;
-println!("AES key sent.");
+        self.tcp.write_all(&encrypted)?;
 
-println!("Sending nonce...");
-self.tcp.write_all(&self.nonce)?;
-println!("Nonce sent.");
+        self.tcp.write_all(&self.nonce)?;
 
-println!("Handshake complete.");
-
+        println!("Handshake complete.");
         Ok(())
     }
    fn send_file(
@@ -471,15 +462,10 @@ println!(
     transfer_start.elapsed()
 );
 
+// Tell receiver the initial UDP transfer is finished
 self.tcp.write_all(&[INITIAL_TRANSFER_COMPLETE])?;
 self.tcp.flush()?;
 
-let mut ready = [0u8; 1];
-self.tcp.read_exact(&mut ready)?;
-
-if ready[0] != READY_FOR_SCAN {
-    anyhow::bail!("Receiver not ready");
-}
 // Measure retransmission
 let retrans_start = Instant::now();
 
