@@ -5,7 +5,7 @@ pub const DATA_PORT: u16 = 5000;
 
 pub const KEY_PORT: u16 = 5001;
 
-pub const CHUNK_SIZE: usize = 32769;
+pub const CHUNK_SIZE: usize = 32768;
 
 pub const NUM_WORKERS: usize = 4;
 
