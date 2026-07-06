@@ -55,6 +55,14 @@ pub const ACK_INTERVAL_MS: u64 = 15;
 // resend the packet proactively.
 pub const RTO_MS: u64 = 200;
 
+// Minimum time that must pass before the same chunk id can be resent
+// again in response to the receiver reporting it "missing". The receiver
+// reports its missing list on every ACK_INTERVAL_MS tick (15ms) - without
+// this gate, a chunk that's still missing gets resent on every single
+// tick, turning a handful of stuck chunks into a multi-thousand-packet-
+// per-second retransmission storm that never lets up.
+pub const MIN_RESEND_INTERVAL_MS: u64 = 60;
+
 // How far past the receiver's cumulative "highest contiguous" point it
 // scans for gaps to report each round. Keeps ACK packets small and
 // focused on the currently-active window instead of listing every

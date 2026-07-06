@@ -21,7 +21,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::config::{INITIAL_WINDOW, MAX_WINDOW, MIN_WINDOW, RTO_MS, WINDOW_GROWTH_STEP};
+use crate::config::{INITIAL_WINDOW, MAX_WINDOW, MIN_RESEND_INTERVAL_MS, MIN_WINDOW, RTO_MS, WINDOW_GROWTH_STEP};
 
 pub struct InFlightPacket {
     pub sent_at: Instant,
@@ -125,7 +125,23 @@ impl TransportState {
             self.shrink();
         }
 
-        missing.to_vec()
+        // Gate: only actually resend an id if it hasn't been (re)sent very
+        // recently. Without this, every 15ms ACK reporting the same still-
+        // missing id triggers another immediate resend, so a handful of
+        // genuinely stuck chunks turn into a nonstop flood instead of a
+        // handful of retries per second.
+        let now = Instant::now();
+        let min_gap = Duration::from_millis(MIN_RESEND_INTERVAL_MS);
+        missing
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.inflight
+                    .get(id)
+                    .map(|p| now.duration_since(p.sent_at) > min_gap)
+                    .unwrap_or(true)
+            })
+            .collect()
     }
 
     /// Packets that have been in flight longer than the retransmit timeout
