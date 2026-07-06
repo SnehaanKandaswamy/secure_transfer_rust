@@ -406,30 +406,25 @@ let mut retransmitted = 0u64;
             "Retransmitting {} chunks...",
             count
         );
+// Read ALL chunk IDs at once
+let mut id_buffer = vec![0u8; count as usize * 4];
+self.tcp.read_exact(&mut id_buffer)?;
 
-        for _ in 0..count {
+// Process every ID
+for chunk in id_buffer.chunks_exact(4) {
 
-            let mut id_buf = [0u8; 4];
+    let chunk_id =
+        u32::from_be_bytes(chunk.try_into().unwrap());
 
-            self.tcp.read_exact(&mut id_buf)?;
-
-            let chunk_id =
-                u32::from_be_bytes(id_buf);
-
-           if let Some(packet) = packet_cache.get(chunk_id as usize) {
-                if !packet.is_empty() {
-                    self.udp.send(packet)?;
-                    retransmitted += 1;
-                }
-            }
-            else {
-
-                println!(
-                    "Chunk {} not found in cache!",
-                    chunk_id
-                );
-            }
+    if let Some(packet) = packet_cache.get(chunk_id as usize) {
+        if !packet.is_empty() {
+            self.udp.send(packet)?;
+            retransmitted += 1;
         }
+    } else {
+        println!("Chunk {} not found in cache", chunk_id);
+    }
+}
 
         println!("Retransmission round complete.");
 

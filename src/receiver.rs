@@ -538,11 +538,15 @@ println!("Requesting retransmission...");
 // Send number of missing chunks
 stream.write_all(&(missing.len() as u32).to_be_bytes())?;
 
-// Send every missing chunk ID
+// Build one buffer containing all IDs
+let mut id_buffer = Vec::with_capacity(missing.len() * 4);
+
 for id in &missing {
-    stream.write_all(&id.to_be_bytes())?;
+    id_buffer.extend_from_slice(&id.to_be_bytes());
 }
 
+// Send them all at once
+stream.write_all(&id_buffer)?;
 stream.flush()?;
 // Wait until sender has finished retransmitting
 let mut signal = [0u8; 1];
