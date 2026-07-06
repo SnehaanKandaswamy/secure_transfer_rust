@@ -219,7 +219,17 @@ while transport.can_send() {
         }
     udp.send(&packet)?;
     packets_sent += 1;
-std::thread::sleep(std::time::Duration::from_millis(5)); // artificial throttle - diagnostic only
+
+    // Throttle: pause briefly every BATCH packets instead of every
+    // single one. This breaks up the burst enough to avoid whatever
+    // is killing the connection on this network, without adding the
+    // full sleep cost to every packet. Tune BATCH/PAUSE_MS below -
+    // bigger BATCH / smaller PAUSE_MS = faster but burstier.
+    const BATCH: u64 = 64;
+    const PAUSE_MS: u64 = 3;
+    if packets_sent % BATCH == 0 {
+        std::thread::sleep(std::time::Duration::from_millis(PAUSE_MS));
+    }
 
     transport.mark_sent(
     chunk_id,
