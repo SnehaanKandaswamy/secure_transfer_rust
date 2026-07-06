@@ -23,7 +23,7 @@ pub const ACK_INTERVAL: u32 = 128;
 // for this long.
 pub const RETRANSMIT_TIMEOUT_MS: u64 = 10;
 pub const WINDOW_SIZE: usize = 256;
-pub const RETRANSMIT_BATCH_SIZE: usize = 1024;
+pub const RETRANSMIT_BATCH_SIZE: usize = 4096;
 
 // Number of independent UDP sockets/threads used to transmit the
 // initial burst in parallel. Each pulls encrypted chunks off the same
