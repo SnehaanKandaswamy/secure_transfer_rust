@@ -221,6 +221,7 @@ impl Sender {
                 permits_rx.recv()?;
                 opened_blocks.insert(block_id);
                 sent_counts.insert(block_id, 0);
+                println!("[DEBUG] Block {} opened ({} packets)", block_id, block_total);
             }
 
             udp.send(&chunk.packet)?;
@@ -237,6 +238,7 @@ impl Sender {
             if *count == block_total {
                 let end = BlockEndPacket::encode(block_id, block_total as u32);
                 udp.send(&end)?;
+                println!("[DEBUG] Block {} fully sent, BlockEnd emitted", block_id);
             }
 
             if bytes_sent >= next_print {
@@ -280,17 +282,21 @@ impl Sender {
         println!("Control-ack loop started, awaiting {} block(s)", total_blocks);
 
         while completed < total_blocks {
+            println!("[DEBUG] Waiting for BlockAck ({}/{} blocks completed so far)...", completed, total_blocks);
             let ack = BlockAck::read_from(&mut control)?;
 
             match ack {
                 BlockAck::Missing { block_id, missing } => {
+                    println!("[DEBUG] BlockAck::Missing for block {} -> {} packet(s) missing: {:?}", block_id, missing.len(), missing);
                     let packets = cache.fetch_for_retransmit(block_id, &missing);
                     for packet in &packets {
                         udp.send(packet)?;
                         retransmitted += 1;
                     }
+                    println!("[DEBUG] Retransmitted {} packet(s) for block {}", packets.len(), block_id);
                 }
                 BlockAck::Complete { block_id } => {
+                    println!("[DEBUG] BlockAck::Complete for block {} -- releasing cache, moving to next block", block_id);
                     cache.complete(block_id);
                     completed += 1;
                     // Return a slot to the pipeline. If the sender loop has
