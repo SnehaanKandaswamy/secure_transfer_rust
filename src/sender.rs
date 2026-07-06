@@ -182,6 +182,7 @@ impl Sender {
                                 if !packet.is_empty() {
                                     udp.send(packet)?;
                                     retransmitted += 1;
+                                    transport.mark_retransmitted(id);
                                 }
                             }
                         }
@@ -211,16 +212,29 @@ impl Sender {
                 }
             }
 
-            // 3. Pull one fresh chunk in if we don't already have pending
-            // work queued (keeps this fair with retransmits above).
-            if transport.pending.is_empty() && !pipeline_done {
+            // 3. Keep draining freshly encrypted chunks into `pending`
+            // until either the channel runs dry or `pending` has a healthy
+            // buffer queued up. Pulling only a single chunk here (the old
+            // behavior) meant this branch never ran again once `pending`
+            // had even one item left in it - so once the window filled up
+            // (inflight == cwnd, so step 4 stopped draining `pending`),
+            // this stopped draining `chunk_rx` too, workers blocked trying
+            // to send into a full channel, and the reader blocked behind
+            // them. Draining up to a cap keeps `pending` topped up
+            // regardless of whether the window happens to be full right
+            // now.
+            const PENDING_TARGET: usize = 512;
+            while transport.pending.len() < PENDING_TARGET && !pipeline_done {
                 match chunk_rx.try_recv() {
                     Ok(chunk) => {
                         transport.queue_packet(chunk.chunk_id, chunk.packet, chunk.bytes);
                         did_work = true;
                     }
-                    Err(TryRecvError::Empty) => {}
-                    Err(TryRecvError::Disconnected) => pipeline_done = true,
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        pipeline_done = true;
+                        break;
+                    }
                 }
             }
 

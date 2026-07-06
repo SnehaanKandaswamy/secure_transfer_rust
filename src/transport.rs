@@ -79,6 +79,17 @@ impl TransportState {
         self.next_seq = self.next_seq.max(chunk_id + 1);
     }
 
+    /// Reset the in-flight timer for a chunk we just resent. Without this,
+    /// a chunk reported `missing` by an ACK (and resent in that branch)
+    /// keeps its original `sent_at`, so `timed_out()` can immediately
+    /// consider it expired again and resend it a second time on the very
+    /// next loop iteration, even though we just sent it moments ago.
+    pub fn mark_retransmitted(&mut self, chunk_id: u32) {
+        if let Some(p) = self.inflight.get_mut(&chunk_id) {
+            p.sent_at = Instant::now();
+        }
+    }
+
     /// Apply one progress report from the receiver:
     ///   - everything below `highest_contiguous` is fully delivered
     ///   - `acked` lists ids *above* that floor the receiver already has
