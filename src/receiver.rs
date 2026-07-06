@@ -2,6 +2,7 @@
 use anyhow::Result;
 const INITIAL_TRANSFER_COMPLETE: u8 = 0xA1;
 const RETRANSMISSION_COMPLETE: u8 = 0xA2;
+const READY_FOR_SCAN: u8 = 0xA3;
 use std::time::Instant;
 use std::time::Duration;
 use rand::rngs::OsRng;
@@ -9,6 +10,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool,AtomicU32, Ordering},
 };
+
 use std::io::BufWriter;
 use rsa::{
     pkcs8::EncodePublicKey,
@@ -487,100 +489,135 @@ let mut round = 1;
 let udp_receiver = udp.try_clone()?;
 
 let packet_sender = packet_tx.clone();
-
 let received_flags = received.clone();
-
 let running_clone = running.clone();
 
 let receiver_handle = std::thread::spawn(move || {
-
-receiver_thread(
-    udp_receiver,
-    packet_sender,
-    received_flags,
-    running_clone,
-)
+    receiver_thread(
+        udp_receiver,
+        packet_sender,
+        received_flags,
+        running_clone,
+    )
 });
 
 // ---------- Writer thread ----------
+let writer_handle = std::thread::spawn(move || {
+    writer_thread(
+        write_rx,
+        expected_bytes,
+        expected_chunks,
+    )
+});
 
-let writer_handle =
-    std::thread::spawn(move || {
-        writer_thread(
-            write_rx,
-            expected_bytes,
-            expected_chunks,
-        )
-    });
-// Wait until sender has completed the initial UDP transfer
+// ----------------------------------------------------
+// Wait until sender finishes the INITIAL transfer
+// ----------------------------------------------------
 let mut signal = [0u8; 1];
 stream.read_exact(&mut signal)?;
+
 println!("Received INITIAL_TRANSFER_COMPLETE");
 
 if signal[0] != INITIAL_TRANSFER_COMPLETE {
     anyhow::bail!("Invalid synchronization message");
 }
 
-// Allow any in-flight UDP packets to arrive
-//std::thread::sleep(std::time::Duration::from_secs(2));
-println!("Finished waiting");
+// ----------------------------------------------------
+// Retransmission rounds
+// ----------------------------------------------------
 loop {
 
     println!();
     println!("========== Round {} ==========", round);
-println!("About to scan bitmap");
-let count = received
-    .iter()
-    .filter(|x| x.load(Ordering::Acquire))
-    .count();
 
-println!("Bitmap says {} packets received", count);
-println!("Bitmap scan complete");
-let missing = find_missing(&received);
+    println!("Waiting for UDP to become quiet...");
 
-println!("Missing chunks: {}", missing.len());
+    let mut last_count = received
+        .iter()
+        .filter(|x| x.load(Ordering::Acquire))
+        .count();
 
-if !missing.is_empty() {
-    println!(
-        "First few missing IDs: {:?}",
-        &missing[..missing.len().min(10)]
-    );
+    let mut stable = 0;
+
+    loop {
+        std::thread::sleep(Duration::from_millis(200));
+
+        let count = received
+            .iter()
+            .filter(|x| x.load(Ordering::Acquire))
+            .count();
+
+        println!("Bitmap count = {}", count);
+
+        if count == last_count {
+            stable += 1;
+
+            if stable >= 3 {
+                break;
+            }
+        } else {
+            stable = 0;
+            last_count = count;
+        }
+    }
+
+    println!("Receiver ready.");
+
+    stream.write_all(&[READY_FOR_SCAN])?;
+    stream.flush()?;
+
+    println!("Scanning bitmap...");
+
+    let missing = find_missing(&received);
+
+    println!("Missing chunks: {}", missing.len());
+
+    if !missing.is_empty() {
+        println!(
+            "First few missing IDs: {:?}",
+            &missing[..missing.len().min(10)]
+        );
+    }
+
+    if missing.is_empty() {
+
+        println!("All chunks received.");
+
+        stream.write_all(&0u32.to_be_bytes())?;
+        stream.flush()?;
+
+        running.store(false, Ordering::Release);
+
+        break;
+    }
+
+    println!("Requesting retransmission...");
+
+    stream.write_all(&(missing.len() as u32).to_be_bytes())?;
+
+    for id in &missing {
+        stream.write_all(&id.to_be_bytes())?;
+    }
+
+    stream.flush()?;
+
+    // Wait until sender has completed this retransmission
+    let mut signal = [0u8; 1];
+    stream.read_exact(&mut signal)?;
+
+    if signal[0] != RETRANSMISSION_COMPLETE {
+        anyhow::bail!("Expected RETRANSMISSION_COMPLETE");
+    }
+
+    round += 1;
 }
 
-
-if missing.is_empty() {
-
-    println!("All chunks received.");
-    
-    stream.write_all(&0u32.to_be_bytes())?;
-
-    running.store(false, Ordering::Release);
-
-    break;
-}
-println!("Requesting retransmission...");
-println!("Sending retransmission request");
-// Send number of missing chunks
-stream.write_all(&(missing.len() as u32).to_be_bytes())?;
-
-// Send every missing chunk ID
-for id in &missing {
-    stream.write_all(&id.to_be_bytes())?;
-}
-
-stream.flush()?;
-// Wait until sender has finished retransmitting
-let mut signal = [0u8; 1];
-stream.read_exact(&mut signal)?;
-
-if signal[0] != RETRANSMISSION_COMPLETE {
-    anyhow::bail!("Expected retransmission complete");
-}
-
-round += 1;}
 println!("Dropping packet_tx");
-drop(packet_tx);   // <-- ADD IT HERE
+
+drop(packet_tx);
+
 receiver_handle.join().unwrap()?;
+
 println!("Receiver joined");
 println!(
     "Receive rounds  : {:.3?}",

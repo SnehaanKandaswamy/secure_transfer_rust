@@ -3,6 +3,7 @@ use anyhow::Result;
 use std::time::Instant;
 const INITIAL_TRANSFER_COMPLETE: u8 = 0xA1;
 const RETRANSMISSION_COMPLETE: u8 = 0xA2;
+const READY_FOR_SCAN: u8 = 0xA3;
 use std::time::Duration;
 use rand::{rngs::OsRng, RngCore};
 use std::collections::HashMap;
@@ -470,10 +471,15 @@ println!(
     transfer_start.elapsed()
 );
 
-// Tell receiver the initial UDP transfer is finished
 self.tcp.write_all(&[INITIAL_TRANSFER_COMPLETE])?;
 self.tcp.flush()?;
 
+let mut ready = [0u8; 1];
+self.tcp.read_exact(&mut ready)?;
+
+if ready[0] != READY_FOR_SCAN {
+    anyhow::bail!("Receiver not ready");
+}
 // Measure retransmission
 let retrans_start = Instant::now();
 
