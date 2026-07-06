@@ -219,6 +219,7 @@ while transport.can_send() {
         }
     udp.send(&packet)?;
     packets_sent += 1;
+std::thread::sleep(std::time::Duration::from_millis(5)); // artificial throttle - diagnostic only
 
     transport.mark_sent(
     chunk_id,
