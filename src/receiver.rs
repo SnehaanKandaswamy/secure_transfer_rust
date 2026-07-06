@@ -503,7 +503,7 @@ if signal[0] != INITIAL_TRANSFER_COMPLETE {
 }
 
 // Allow any in-flight UDP packets to arrive
-std::thread::sleep(std::time::Duration::from_millis(1));
+std::thread::sleep(std::time::Duration::from_millis(50));
 loop {
 
     println!();
