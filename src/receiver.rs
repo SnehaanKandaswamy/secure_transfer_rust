@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use rand::rngs::OsRng;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
 };
 use std::io::BufWriter;
@@ -26,6 +26,7 @@ fn receiver_thread(
     tx: ChannelSender<ReceivedPacket>,
     received: Arc<Vec<AtomicBool>>,
     running: Arc<AtomicBool>,
+    packets_seen: Arc<AtomicU64>,
 ) -> Result<()> {
     println!("Receiver thread started");
     use std::{convert::TryInto, io::ErrorKind};
@@ -41,6 +42,7 @@ fn receiver_thread(
             Ok((size, _)) => {
                 recv_time += t.elapsed();
                 packets += 1;
+                packets_seen.fetch_add(1, Ordering::Relaxed);
 
                 if size < 16 {
                     continue;
@@ -71,7 +73,10 @@ fn receiver_thread(
                 recv_time += t.elapsed();
                 continue;
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => {
+                eprintln!("Receiver thread: recv_from failed, exiting: {e}");
+                return Err(e.into());
+            }
         }
     }
     println!("Total recv_from() time: {:.3?}", recv_time);
@@ -172,11 +177,25 @@ fn ack_sender_thread(
     mut stream: TcpStream,
     received: Arc<Vec<AtomicBool>>,
     expected_chunks: u32,
+    packets_seen: Arc<AtomicU64>,
 ) -> Result<()> {
     let mut cursor: u32 = 0;
+    let mut last_status_print = Instant::now();
 
     loop {
         std::thread::sleep(Duration::from_millis(ACK_INTERVAL_MS));
+
+        if last_status_print.elapsed() > Duration::from_secs(2) {
+            let total_received = received.iter().filter(|b| b.load(Ordering::Acquire)).count();
+            println!(
+                "recv status: udp_packets_seen={} cursor={} total_received={}/{}",
+                packets_seen.load(Ordering::Relaxed),
+                cursor,
+                total_received,
+                expected_chunks
+            );
+            last_status_print = Instant::now();
+        }
 
         // Advance the cumulative low-water mark as far as it'll go.
         while cursor < expected_chunks && received[cursor as usize].load(Ordering::Acquire) {
@@ -291,6 +310,7 @@ pub fn run() -> Result<()> {
             .collect::<Vec<_>>(),
     );
     let running = Arc::new(AtomicBool::new(true));
+    let packets_seen = Arc::new(AtomicU64::new(0));
 
     let mut workers = Vec::new();
     for _ in 0..NUM_WORKERS {
@@ -310,8 +330,9 @@ pub fn run() -> Result<()> {
     let received_flags = received.clone();
     let running_clone = running.clone();
 
+    let packets_seen_recv = packets_seen.clone();
     let receiver_handle = std::thread::spawn(move || {
-        receiver_thread(udp_receiver, packet_sender, received_flags, running_clone)
+        receiver_thread(udp_receiver, packet_sender, received_flags, running_clone, packets_seen_recv)
     });
 
     let writer_handle = std::thread::spawn(move || writer_thread(write_rx, expected_bytes, expected_chunks));
@@ -324,7 +345,10 @@ pub fn run() -> Result<()> {
     // nothing was reported until the entire file had already been sent.
     let ack_stream = stream.try_clone()?;
     let ack_received = received.clone();
-    let ack_handle = std::thread::spawn(move || ack_sender_thread(ack_stream, ack_received, expected_chunks));
+    let packets_seen_ack = packets_seen.clone();
+    let ack_handle = std::thread::spawn(move || {
+        ack_sender_thread(ack_stream, ack_received, expected_chunks, packets_seen_ack)
+    });
 
     // Blocks until the ack thread has told the sender it has everything.
     ack_handle.join().unwrap()?;
