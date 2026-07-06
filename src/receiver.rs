@@ -370,16 +370,18 @@ println!("Public key sent.");
     let mut len=[0u8;4];
 
 
-    stream.read_exact(&mut len)?;
-
+println!("Waiting for AES key length...");
+stream.read_exact(&mut len)?;
+println!("AES key length received.");
     let enc_len=
         u32::from_be_bytes(len) as usize;
 
     let mut encrypted=
         vec![0u8;enc_len];
 
-    stream.read_exact(&mut encrypted)?;
-
+println!("Waiting for encrypted AES key...");
+stream.read_exact(&mut encrypted)?;
+println!("Encrypted AES key received.");
     let session_key_vec =
     private.decrypt(
         Oaep::new::<Sha256>(),
@@ -393,8 +395,9 @@ println!("Public key sent.");
 
     let mut nonce=[0u8;16];
 
-    stream.read_exact(&mut nonce)?;
-
+println!("Waiting for nonce...");
+stream.read_exact(&mut nonce)?;
+println!("Nonce received.");
     println!("Handshake complete.");
     let mut chunk_buf = [0u8; 4];
 stream.read_exact(&mut chunk_buf)?;

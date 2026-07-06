@@ -283,15 +283,20 @@ println!("==============================");
                 &self.session_key,
             )?;
 
-        self.tcp.write_all(
-            &(encrypted.len() as u32).to_be_bytes(),
-        )?;
+      println!("Sending AES key length...");
+self.tcp.write_all(&(encrypted.len() as u32).to_be_bytes())?;
+println!("AES key length sent.");
 
-        self.tcp.write_all(&encrypted)?;
+println!("Sending AES key...");
+self.tcp.write_all(&encrypted)?;
+println!("AES key sent.");
 
-        self.tcp.write_all(&self.nonce)?;
+println!("Sending nonce...");
+self.tcp.write_all(&self.nonce)?;
+println!("Nonce sent.");
 
-        println!("Handshake complete.");
+println!("Handshake complete.");
+
         Ok(())
     }
    fn send_file(
