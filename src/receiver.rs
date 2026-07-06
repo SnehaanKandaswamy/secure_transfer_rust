@@ -67,7 +67,11 @@ recv_time += t.elapsed();
 packets += 1;
 
 if packets % 1000 == 0 {
-    println!("Received {} packets", packets);
+    println!(
+        "Received {} packets after {:?}",
+        packets,
+        thread_start.elapsed()
+    );
 }
 
 if size < 16 {
@@ -508,25 +512,27 @@ let writer_handle =
 // Wait until sender has completed the initial UDP transfer
 let mut signal = [0u8; 1];
 stream.read_exact(&mut signal)?;
+println!("Received INITIAL_TRANSFER_COMPLETE");
 
 if signal[0] != INITIAL_TRANSFER_COMPLETE {
     anyhow::bail!("Invalid synchronization message");
 }
 
 // Allow any in-flight UDP packets to arrive
-std::thread::sleep(std::time::Duration::from_secs(2));
+//std::thread::sleep(std::time::Duration::from_secs(2));
+println!("Finished waiting");
 loop {
 
     println!();
     println!("========== Round {} ==========", round);
-
+println!("About to scan bitmap");
 let count = received
     .iter()
     .filter(|x| x.load(Ordering::Acquire))
     .count();
 
 println!("Bitmap says {} packets received", count);
-    
+println!("Bitmap scan complete");
 let missing = find_missing(&received);
 
 println!("Missing chunks: {}", missing.len());
@@ -542,7 +548,7 @@ if !missing.is_empty() {
 if missing.is_empty() {
 
     println!("All chunks received.");
-
+    
     stream.write_all(&0u32.to_be_bytes())?;
 
     running.store(false, Ordering::Release);
@@ -550,7 +556,7 @@ if missing.is_empty() {
     break;
 }
 println!("Requesting retransmission...");
-
+println!("Sending retransmission request");
 // Send number of missing chunks
 stream.write_all(&(missing.len() as u32).to_be_bytes())?;
 
