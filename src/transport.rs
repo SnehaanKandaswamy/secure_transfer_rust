@@ -4,8 +4,9 @@
 //! model. The sender keeps a bounded number of unacknowledged packets in
 //! flight (`cwnd`) instead of firing the whole file as fast as the socket
 //! will accept it. The receiver reports progress continuously - a
-//! cumulative "highest contiguous" marker plus a short list of specific
-//! gaps - and the sender reacts immediately:
+//! cumulative "highest contiguous" marker, plus which ids above that floor
+//! it already has (selective ack) and which it's still missing - and the
+//! sender reacts immediately:
 //!
 //!   * No losses reported  -> grow the window (we can push harder)
 //!   * Losses reported     -> shrink the window and resend just those IDs
@@ -23,13 +24,12 @@ use std::{
 use crate::config::{INITIAL_WINDOW, MAX_WINDOW, MIN_WINDOW, RTO_MS, WINDOW_GROWTH_STEP};
 
 pub struct InFlightPacket {
-    pub bytes: usize,
     pub sent_at: Instant,
 }
 
 pub struct TransportState {
     /// Congestion window: the max number of packets allowed in flight
-    /// (sent, not yet cumulatively acknowledged) at any given moment.
+    /// (sent, not yet acknowledged one way or another) at any given moment.
     pub cwnd: usize,
 
     /// Lowest chunk id the receiver has confirmed contiguously up to.
@@ -38,7 +38,8 @@ pub struct TransportState {
     /// Next fresh sequence number handed out by `mark_sent`.
     pub next_seq: u32,
 
-    /// Packets sent but not yet cumulatively acknowledged, keyed by chunk id.
+    /// Packets sent but not yet acknowledged (cumulatively or selectively),
+    /// keyed by chunk id.
     pub inflight: BTreeMap<u32, InFlightPacket>,
 
     /// Packets waiting for window space before their first transmission.
@@ -73,26 +74,39 @@ impl TransportState {
         self.inflight.len() < self.cwnd
     }
 
-    pub fn mark_sent(&mut self, chunk_id: u32, bytes: usize) {
-        self.inflight.insert(
-            chunk_id,
-            InFlightPacket {
-                bytes,
-                sent_at: Instant::now(),
-            },
-        );
+    pub fn mark_sent(&mut self, chunk_id: u32) {
+        self.inflight.insert(chunk_id, InFlightPacket { sent_at: Instant::now() });
         self.next_seq = self.next_seq.max(chunk_id + 1);
     }
 
-    /// Apply one progress report from the receiver: everything below
-    /// `highest_contiguous` is fully delivered, and `missing` lists specific
-    /// gaps within the window the receiver is currently watching.
+    /// Apply one progress report from the receiver:
+    ///   - everything below `highest_contiguous` is fully delivered
+    ///   - `acked` lists ids *above* that floor the receiver already has
+    ///     (selective ack) - a later chunk can arrive fine even while an
+    ///     earlier one is still missing, and without this list those later
+    ///     chunks could never be evicted from `inflight` just because the
+    ///     cumulative floor hasn't caught up to them yet
+    ///   - `missing` lists ids the receiver is still waiting on
     ///
     /// Returns the chunk ids to retransmit right now (empty if the round
     /// was clean, in which case the window also grows).
-    pub fn on_ack(&mut self, highest_contiguous: u32, missing: &[u32]) -> Vec<u32> {
-        self.inflight.retain(|&id, _| id >= highest_contiguous);
+    pub fn on_ack(&mut self, highest_contiguous: u32, acked: &[u32], missing: &[u32]) -> Vec<u32> {
         self.send_base = self.send_base.max(highest_contiguous);
+
+        // Cumulative floor: anything below it is done, whether or not we
+        // still happen to have a stale inflight entry for it.
+        self.inflight.retain(|&id, _| id >= highest_contiguous);
+
+        // Selective ack: evict specific later ids the receiver confirms it
+        // has, even though the contiguous floor hasn't reached them yet.
+        // This is the fix for the freeze - previously only the cumulative
+        // floor could evict anything, so one stuck low chunk id pinned
+        // every chunk sent after it in `inflight` forever, `can_send()`
+        // never went true again, and the window stuck at MIN_WINDOW with
+        // nothing moving.
+        for &id in acked {
+            self.inflight.remove(&id);
+        }
 
         if missing.is_empty() {
             self.grow();
@@ -104,8 +118,10 @@ impl TransportState {
     }
 
     /// Packets that have been in flight longer than the retransmit timeout
-    /// without being cumulatively acked or reported missing yet. Covers the
-    /// case where the ACK itself (not the data) got dropped.
+    /// without being acknowledged (cumulatively or selectively) or reported
+    /// missing yet. Covers the case where the ACK itself got dropped, or a
+    /// chunk was sent further ahead than the receiver's current report
+    /// window covers.
     pub fn timed_out(&mut self) -> Vec<u32> {
         let now = Instant::now();
         let rto = Duration::from_millis(RTO_MS);

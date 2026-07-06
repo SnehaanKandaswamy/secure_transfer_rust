@@ -190,18 +190,27 @@ fn ack_sender_thread(
             return Ok(());
         }
 
-        // Only scan/report gaps within a bounded lookahead window so the
-        // ACK stays small even on multi-GB files - the sender's own window
-        // won't be sending much further ahead than this anyway.
+        // Only scan/report within a bounded lookahead window so the ACK
+        // stays small even on multi-GB files - the sender's own window
+        // won't be sending much further ahead than this anyway. Report
+        // BOTH which ids in this range are already delivered (selective
+        // ack) and which are still missing: without the selective-ack
+        // list, a chunk that lands fine after a still-missing earlier one
+        // could never be evicted from the sender's inflight set, since the
+        // cumulative floor alone never reaches it. That was the exact bug
+        // that froze the transfer at a fixed window size.
         let scan_end = expected_chunks.min(cursor + MISSING_LOOKAHEAD);
+        let mut acked = Vec::new();
         let mut missing = Vec::new();
         for id in cursor..scan_end {
-            if !received[id as usize].load(Ordering::Acquire) {
+            if received[id as usize].load(Ordering::Acquire) {
+                acked.push(id);
+            } else {
                 missing.push(id);
             }
         }
 
-        stream.write_all(&protocol::encode_ack(cursor, &missing))?;
+        stream.write_all(&protocol::encode_ack(cursor, &acked, &missing))?;
         stream.flush()?;
     }
 }

@@ -24,11 +24,19 @@ pub struct MissingPacket {
 // ---------------- Continuous control channel (receiver -> sender) ----------------
 //
 // Sent repeatedly over TCP for the lifetime of a transfer instead of once at
-// the very end. `Ack` is a progress report: everything below
-// `highest_contiguous` is fully delivered, and `missing` lists specific gaps
-// within the window the receiver is currently watching (bounded by
-// MISSING_LOOKAHEAD so the message stays small on big files). `Done` closes
-// the loop once every chunk has arrived.
+// the very end.
+//
+// `Ack` is a progress report bounded to the receiver's current lookahead
+// window:
+//   - `highest_contiguous`: everything below this is fully delivered.
+//   - `acked`: ids *above* that floor the receiver already has (selective
+//     ack). Needed because a later chunk can land fine while an earlier one
+//     is still missing - without reporting these explicitly, the sender has
+//     no way to know it can stop tracking them, since the cumulative floor
+//     alone never reaches them.
+//   - `missing`: ids in the window the receiver is still waiting on.
+//
+// `Done` closes the loop once every chunk has arrived.
 
 const ACK_TAG: u8 = 0x01;
 const DONE_TAG: u8 = 0x02;
@@ -36,19 +44,27 @@ const DONE_TAG: u8 = 0x02;
 pub enum ControlMessage {
     Ack {
         highest_contiguous: u32,
+        acked: Vec<u32>,
         missing: Vec<u32>,
     },
     Done,
 }
 
-pub fn encode_ack(highest_contiguous: u32, missing: &[u32]) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(1 + 4 + 4 + missing.len() * 4);
+pub fn encode_ack(highest_contiguous: u32, acked: &[u32], missing: &[u32]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(1 + 4 + 4 + acked.len() * 4 + 4 + missing.len() * 4);
     buf.push(ACK_TAG);
     buf.extend_from_slice(&highest_contiguous.to_be_bytes());
+
+    buf.extend_from_slice(&(acked.len() as u32).to_be_bytes());
+    for id in acked {
+        buf.extend_from_slice(&id.to_be_bytes());
+    }
+
     buf.extend_from_slice(&(missing.len() as u32).to_be_bytes());
     for id in missing {
         buf.extend_from_slice(&id.to_be_bytes());
     }
+
     buf
 }
 
@@ -67,24 +83,30 @@ pub fn read_control_message(stream: &mut impl Read) -> Result<ControlMessage> {
             stream.read_exact(&mut hc_buf)?;
             let highest_contiguous = u32::from_be_bytes(hc_buf);
 
-            let mut count_buf = [0u8; 4];
-            stream.read_exact(&mut count_buf)?;
-            let count = u32::from_be_bytes(count_buf) as usize;
-
-            let mut id_bytes = vec![0u8; count * 4];
-            stream.read_exact(&mut id_bytes)?;
-
-            let missing = id_bytes
-                .chunks_exact(4)
-                .map(|c| u32::from_be_bytes(c.try_into().unwrap()))
-                .collect();
+            let acked = read_id_list(stream)?;
+            let missing = read_id_list(stream)?;
 
             Ok(ControlMessage::Ack {
                 highest_contiguous,
+                acked,
                 missing,
             })
         }
         DONE_TAG => Ok(ControlMessage::Done),
         other => bail!("unknown control message tag: {other}"),
     }
+}
+
+fn read_id_list(stream: &mut impl Read) -> Result<Vec<u32>> {
+    let mut count_buf = [0u8; 4];
+    stream.read_exact(&mut count_buf)?;
+    let count = u32::from_be_bytes(count_buf) as usize;
+
+    let mut id_bytes = vec![0u8; count * 4];
+    stream.read_exact(&mut id_bytes)?;
+
+    Ok(id_bytes
+        .chunks_exact(4)
+        .map(|c| u32::from_be_bytes(c.try_into().unwrap()))
+        .collect())
 }

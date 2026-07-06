@@ -174,9 +174,9 @@ impl Sender {
             // both retransmission and window sizing.
             loop {
                 match ack_rx.try_recv() {
-                    Ok(protocol::ControlMessage::Ack { highest_contiguous, missing }) => {
+                    Ok(protocol::ControlMessage::Ack { highest_contiguous, acked, missing }) => {
                         did_work = true;
-                        let to_resend = transport.on_ack(highest_contiguous, &missing);
+                        let to_resend = transport.on_ack(highest_contiguous, &acked, &missing);
                         for id in to_resend {
                             if let Some(packet) = packet_cache.get(id as usize) {
                                 if !packet.is_empty() {
@@ -234,7 +234,7 @@ impl Sender {
                 packets_sent += 1;
                 did_work = true;
 
-                transport.mark_sent(chunk_id, bytes);
+                transport.mark_sent(chunk_id);
 
                 packet_cache[chunk_id as usize] = packet;
                 bytes_sent += bytes as u64;
