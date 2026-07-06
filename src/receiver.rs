@@ -1,4 +1,5 @@
 //Best
+println!("===== BUILD 2026-07-06 TEST =====");
 use anyhow::Result;
 const INITIAL_TRANSFER_COMPLETE: u8 = 0xA1;
 const RETRANSMISSION_COMPLETE: u8 = 0xA2;
