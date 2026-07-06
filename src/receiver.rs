@@ -66,11 +66,11 @@ while running.load(Ordering::Acquire) {
 recv_time += t.elapsed();
 packets += 1;
 
-if packets % 1000 == 0 {
+if packets % 100 == 0 {
     println!(
-        "Received {} packets after {:?}",
+        "recv_from packet {} (size {})",
         packets,
-        thread_start.elapsed()
+        size
     );
 }
 
@@ -187,7 +187,9 @@ if hash != packet.hash {
 
     continue;
 }
-
+        if packets % 100 == 0 {
+    println!("Sending packet {} to channel", chunk_id);
+}
         tx.send(
             DecryptedChunk {
                 chunk_id: packet.chunk_id,
@@ -323,6 +325,7 @@ udp.set_read_timeout(Some(Duration::from_millis(100)))?;
     "Actual recv buffer = {}",
     socket.recv_buffer_size()?
 );
+println!("Socket read timeout = {:?}", udp.read_timeout()?);
 
     println!("Receiver bound to {}", udp.local_addr()?);
     println!("Waiting for UDP...");

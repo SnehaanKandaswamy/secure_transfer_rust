@@ -218,6 +218,9 @@ while transport.can_send() {
     println!("First packet size = {}", packet.len());
         }
     udp.send(&packet)?;
+    if packets_sent % 128 == 0 {
+    std::thread::sleep(std::time::Duration::from_micros(100));
+}
     packets_sent += 1;
 
     transport.mark_sent(
