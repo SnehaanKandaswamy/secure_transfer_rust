@@ -74,10 +74,6 @@ if size < 16 {
     continue;
 }
 
-                if size < 16 {
-                    
-                    continue;
-                }
 
                 let chunk_id =
                     u32::from_be_bytes(
@@ -317,6 +313,10 @@ udp.set_read_timeout(Some(Duration::from_millis(100)))?;
     let socket = Socket::from(udp.try_clone()?);
 
     socket.set_recv_buffer_size(64 * 1024 * 1024)?;
+    println!(
+    "Actual recv buffer = {}",
+    socket.recv_buffer_size()?
+);
 
     println!("Receiver bound to {}", udp.local_addr()?);
     println!("Waiting for UDP...");
@@ -511,13 +511,18 @@ if signal[0] != INITIAL_TRANSFER_COMPLETE {
 }
 
 // Allow any in-flight UDP packets to arrive
-std::thread::sleep(std::time::Duration::from_millis(50));
+std::thread::sleep(std::time::Duration::from_secs(2));
 loop {
 
     println!();
     println!("========== Round {} ==========", round);
 
-    
+let count = received
+    .iter()
+    .filter(|x| x.load(Ordering::Acquire))
+    .count();
+
+println!("Bitmap says {} packets received", count);
     
 let missing = find_missing(&received);
 
