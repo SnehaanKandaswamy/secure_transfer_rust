@@ -35,25 +35,25 @@ pub const RETRANSMIT_BATCH_SIZE: usize = 4096;
 // and ramps up automatically on clean links.
 
 // Starting window size (packets in flight), before any feedback arrives.
-pub const INITIAL_WINDOW: usize = 64;
+pub const INITIAL_WINDOW: usize = 256;
 
 // Window never shrinks below this, so we always make forward progress
 // even on very lossy links.
-pub const MIN_WINDOW: usize = 32;
+pub const MIN_WINDOW: usize = 128;
 
 // Window never grows past this - just a safety ceiling.
 pub const MAX_WINDOW: usize = 4096;
 
 // How much the window grows after each clean (loss-free) ACK round.
-pub const WINDOW_GROWTH_STEP: usize = 32;
+pub const WINDOW_GROWTH_STEP: usize = 128;
 
 // How often the receiver reports progress back to the sender.
-pub const ACK_INTERVAL_MS: u64 = 15;
+pub const ACK_INTERVAL_MS: u64 = 10;
 
 // If we haven't heard *anything* about a packet (ack or "missing") after
 // this long, assume the ACK carrying that news was itself lost and just
 // resend the packet proactively.
-pub const RTO_MS: u64 = 200;
+pub const RTO_MS: u64 = 60;
 
 // Minimum time that must pass before the same chunk id can be resent
 // again in response to the receiver reporting it "missing". The receiver
@@ -61,7 +61,7 @@ pub const RTO_MS: u64 = 200;
 // this gate, a chunk that's still missing gets resent on every single
 // tick, turning a handful of stuck chunks into a multi-thousand-packet-
 // per-second retransmission storm that never lets up.
-pub const MIN_RESEND_INTERVAL_MS: u64 = 60;
+pub const MIN_RESEND_INTERVAL_MS: u64 = 40;
 
 // How far past the receiver's cumulative "highest contiguous" point it
 // scans for gaps to report each round. Keeps ACK packets small and

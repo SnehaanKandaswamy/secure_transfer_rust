@@ -35,6 +35,7 @@ use crate::transport::TransportState;
 impl Sender {
     pub fn new(filename: &str) -> Result<Self> {
         let tcp = TcpStream::connect(format!("{}:{}", RECEIVER_IP, KEY_PORT))?;
+        tcp.set_nodelay(true)?;
 
         let udp = UdpSocket::bind("0.0.0.0:0")?;
         udp.connect(format!("{}:{}", RECEIVER_IP, DATA_PORT))?;

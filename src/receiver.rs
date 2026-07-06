@@ -258,6 +258,7 @@ pub fn run() -> Result<()> {
     println!("Waiting for connection...");
 
     let (mut stream, addr) = listener.accept()?;
+    stream.set_nodelay(true)?;
     println!("Connected to {}", addr);
 
     //---------------- RSA ----------------//
