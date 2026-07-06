@@ -165,6 +165,22 @@ impl Sender {
 
         println!("Sender transport loop started (initial window = {})", transport.cwnd);
 
+        // A single UDP send failure (transient OS/network hiccup, brief
+        // ICMP unreachable, AV interference, etc.) used to be treated as
+        // fatal via `?`, which killed the entire transfer over one bad
+        // packet. UDP sends are expected to occasionally fail - that's the
+        // whole reason this protocol retries - so log and move on instead;
+        // the retransmit/timeout logic already covers the lost packet.
+        let udp_send = |udp: &UdpSocket, packet: &[u8]| -> bool {
+            match udp.send(packet) {
+                Ok(_) => true,
+                Err(e) => {
+                    eprintln!("udp send failed (non-fatal, will retry): {e}");
+                    false
+                }
+            }
+        };
+
         let mut last_window_print = Instant::now();
 
         loop {
@@ -181,8 +197,9 @@ impl Sender {
                         for id in to_resend {
                             if let Some(packet) = packet_cache.get(id as usize) {
                                 if !packet.is_empty() {
-                                    udp.send(packet)?;
-                                    retransmitted += 1;
+                                    if udp_send(&udp, packet) {
+                                        retransmitted += 1;
+                                    }
                                     transport.mark_retransmitted(id);
                                 }
                             }
@@ -206,8 +223,9 @@ impl Sender {
             for id in transport.timed_out() {
                 if let Some(packet) = packet_cache.get(id as usize) {
                     if !packet.is_empty() {
-                        udp.send(packet)?;
-                        retransmitted += 1;
+                        if udp_send(&udp, packet) {
+                            retransmitted += 1;
+                        }
                         did_work = true;
                     }
                 }
@@ -245,7 +263,7 @@ impl Sender {
                     break;
                 };
 
-                udp.send(&packet)?;
+                udp_send(&udp, &packet);
                 packets_sent += 1;
                 did_work = true;
 
