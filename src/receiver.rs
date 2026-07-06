@@ -1,294 +1,211 @@
 //Best
 use anyhow::Result;
-const INITIAL_TRANSFER_COMPLETE: u8 = 0xA1;
-const RETRANSMISSION_COMPLETE: u8 = 0xA2;
-use std::time::Instant;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
 use rand::rngs::OsRng;
 use std::sync::{
+    atomic::{AtomicBool, Ordering},
     Arc,
-    atomic::{AtomicBool,AtomicU32, Ordering},
 };
 use std::io::BufWriter;
-use rsa::{
-    pkcs8::EncodePublicKey,
-    Oaep,
-    RsaPrivateKey,
-    RsaPublicKey,
-};
+use rsa::{pkcs8::EncodePublicKey, Oaep, RsaPrivateKey, RsaPublicKey};
 
 use sha2::Sha256;
 
 use std::{
     io::{Read, Write},
-    net::{TcpListener, UdpSocket},
+    net::{TcpListener, TcpStream, UdpSocket},
 };
-use crate::pipeline::{
-    ReceivedPacket,
-    DecryptedChunk,
-    NUM_WORKERS,
-};
-use crossbeam_channel::{
-    unbounded,
-    Receiver,
-    Sender as ChannelSender,
-};
-use crate::config::{
-    HOST,
-    DATA_PORT,
-    KEY_PORT,
-    CHUNK_SIZE,
-    RETRANSMIT_BATCH_SIZE,
-};
+use crate::pipeline::{DecryptedChunk, ReceivedPacket, NUM_WORKERS};
+use crossbeam_channel::{unbounded, Receiver, Sender as ChannelSender};
+use crate::config::{ACK_INTERVAL_MS, DATA_PORT, HOST, KEY_PORT, MISSING_LOOKAHEAD};
+use crate::protocol;
+
 fn receiver_thread(
     udp: UdpSocket,
     tx: ChannelSender<ReceivedPacket>,
     received: Arc<Vec<AtomicBool>>,
     running: Arc<AtomicBool>,
 ) -> Result<()> {
-   println!("Receiver thread started");
-    use std::{
-        convert::TryInto,
-        io::ErrorKind,
-    };
-   let thread_start = Instant::now();
+    println!("Receiver thread started");
+    use std::{convert::TryInto, io::ErrorKind};
+    let thread_start = Instant::now();
     let mut buffer = vec![0u8; 70000];
     let mut recv_time = std::time::Duration::ZERO;
     let mut packets = 0u64;
-let mut channel_time = Duration::ZERO;
+    let mut channel_time = Duration::ZERO;
 
-while running.load(Ordering::Acquire) {
+    while running.load(Ordering::Acquire) {
         let t = Instant::now();
         match udp.recv_from(&mut buffer) {
-            
             Ok((size, _)) => {
-                 recv_time += t.elapsed();
-                 packets += 1;
-
+                recv_time += t.elapsed();
+                packets += 1;
 
                 if size < 16 {
-                    
                     continue;
                 }
 
-                let chunk_id =
-                    u32::from_be_bytes(
-                        buffer[0..4].try_into()?
-                    );
-            
-
-                
-
-                        let encrypted_size =
-                    u32::from_be_bytes(
-                        buffer[4..8].try_into()?
-                    ) as usize;
+                let chunk_id = u32::from_be_bytes(buffer[0..4].try_into()?);
+                let encrypted_size = u32::from_be_bytes(buffer[4..8].try_into()?) as usize;
 
                 if size < 16 + encrypted_size {
                     continue;
                 }
 
-                let hash =
-                    u64::from_be_bytes(
-                        buffer[8..16].try_into()?
-                    );
-              if chunk_id < received.len() as u32 {
+                let hash = u64::from_be_bytes(buffer[8..16].try_into()?);
 
-    received[chunk_id as usize]
-        .store(true, Ordering::Release);
-  
+                if chunk_id < received.len() as u32 {
+                    received[chunk_id as usize].store(true, Ordering::Release);
+                }
 
-    
-    // Send cumulative ACK to sender.
-}
-
-    
-               let s = Instant::now();
-
-tx.send(
-    ReceivedPacket {
-        chunk_id,
-        encrypted: buffer[16..16 + encrypted_size]
-            .to_vec(),
-        hash,
-    }
-)?;
-
-channel_time += s.elapsed();
+                let s = Instant::now();
+                tx.send(ReceivedPacket {
+                    chunk_id,
+                    encrypted: buffer[16..16 + encrypted_size].to_vec(),
+                    hash,
+                })?;
+                channel_time += s.elapsed();
             }
-          Err(ref e)
-if e.kind() == ErrorKind::TimedOut
-    || e.kind() == ErrorKind::WouldBlock =>
-{
-    recv_time += t.elapsed();
-
-    continue;
-}
-
+            Err(ref e) if e.kind() == ErrorKind::TimedOut || e.kind() == ErrorKind::WouldBlock => {
+                recv_time += t.elapsed();
+                continue;
+            }
             Err(e) => return Err(e.into()),
         }
     }
-    println!(
-    "Total recv_from() time: {:.3?}",
-    recv_time
-);
-println!(
-    "Receiver thread lifetime: {:.3?}",
-    thread_start.elapsed()
-);
-println!("==============================");
-println!("Receiver UDP statistics");
-println!("Packets received : {}", packets);
-println!("recv_from() time : {:.3?}", recv_time);
-println!("==============================");
-
-println!(
-    "Total tx.send() time: {:.3?}",
-    channel_time
-);
-
-Ok(())
-}
-fn worker_thread(
-    rx: Receiver<ReceivedPacket>,
-    tx: ChannelSender<DecryptedChunk>,
-    session_key: [u8;32],
-    nonce: [u8;16],
-) -> Result<()> {
-
-    while let Ok(packet) = rx.recv() {
-
-        let decrypted =
-            crate::crypto::decrypt_chunk(
-                &packet.encrypted,
-                &session_key,
-                &nonce,
-                packet.chunk_id,
-            );
-
-       let hash =
-    crate::checksum::chunk_hash(
-        &decrypted
-    );
-
-
-
-if hash != packet.hash {
-
-   
-
-    continue;
-}
-
-        tx.send(
-            DecryptedChunk {
-                chunk_id: packet.chunk_id,
-                data: decrypted,
-            }
-        )?;
-    }
-
-    println!("Worker finished.");
+    println!("Total recv_from() time: {:.3?}", recv_time);
+    println!("Receiver thread lifetime: {:.3?}", thread_start.elapsed());
+    println!("==============================");
+    println!("Receiver UDP statistics");
+    println!("Packets received : {}", packets);
+    println!("recv_from() time : {:.3?}", recv_time);
+    println!("==============================");
+    println!("Total tx.send() time: {:.3?}", channel_time);
 
     Ok(())
 }
-fn writer_thread(
-    rx: Receiver<DecryptedChunk>,
-    expected_bytes: u64,
-    expected_chunks: u32,
-) -> Result<(u64,u32)> {
 
-   use std::fs::OpenOptions;
+fn worker_thread(
+    rx: Receiver<ReceivedPacket>,
+    tx: ChannelSender<DecryptedChunk>,
+    session_key: [u8; 32],
+    nonce: [u8; 16],
+) -> Result<()> {
+    while let Ok(packet) = rx.recv() {
+        let decrypted = crate::crypto::decrypt_chunk(&packet.encrypted, &session_key, &nonce, packet.chunk_id);
 
-let file = OpenOptions::new()
-    .create(true)
-    .write(true)
-    .truncate(true)
-    .open("reconstructed.bin")?;
+        let hash = crate::checksum::chunk_hash(&decrypted);
 
-// Reserve the entire file size
-file.set_len(expected_bytes)?;
+        if hash != packet.hash {
+            continue;
+        }
 
-let mut outfile = BufWriter::with_capacity(
-    32 * 1024 * 1024,
-    file,
-);
+        tx.send(DecryptedChunk {
+            chunk_id: packet.chunk_id,
+            data: decrypted,
+        })?;
+    }
+
+    println!("Worker finished.");
+    Ok(())
+}
+
+fn writer_thread(rx: Receiver<DecryptedChunk>, expected_bytes: u64, expected_chunks: u32) -> Result<(u64, u32)> {
+    use std::fs::OpenOptions;
+
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open("reconstructed.bin")?;
+
+    file.set_len(expected_bytes)?;
+
+    let mut outfile = BufWriter::with_capacity(32 * 1024 * 1024, file);
     let mut bytes = 0u64;
     let mut chunks_written = 0u32;
     let mut next_chunk = 0u32;
-    let mut chunks: Vec<Option<Vec<u8>>> =
-    (0..expected_chunks)
-        .map(|_| None)
-        .collect();
-    let mut next_print =
-        500 * 1024 * 1024;
+    let mut chunks: Vec<Option<Vec<u8>>> = (0..expected_chunks).map(|_| None).collect();
+    let mut next_print = 500 * 1024 * 1024;
 
     let io_start = Instant::now();
     while let Ok(chunk) = rx.recv() {
+        chunks[chunk.chunk_id as usize] = Some(chunk.data);
 
-    chunks[chunk.chunk_id as usize] = Some(chunk.data);
+        while next_chunk < expected_chunks {
+            let Some(data) = chunks[next_chunk as usize].take() else {
+                break;
+            };
 
-while next_chunk < expected_chunks {
+            outfile.write_all(&data)?;
+            bytes += data.len() as u64;
+            chunks_written += 1;
+            next_chunk += 1;
 
-    let Some(data) =
-        chunks[next_chunk as usize].take()
-    else {
-        break;
-    };
-
-    outfile.write_all(&data)?;
-
-    bytes += data.len() as u64;
-
-    chunks_written += 1;
-
-    next_chunk += 1;
-
-    if bytes >= next_print {
-
-        println!(
-            "Received {:.2} MB",
-            bytes as f64 /
-            (1024.0 * 1024.0)
-        );
-
-        next_print += 500 * 1024 * 1024;
+            if bytes >= next_print {
+                println!("Received {:.2} MB", bytes as f64 / (1024.0 * 1024.0));
+                next_print += 500 * 1024 * 1024;
+            }
+        }
     }
-}
-
-
-}
-    println!(
-    "Actual file writes: {:?}",
-    io_start.elapsed()
-);
+    println!("Actual file writes: {:?}", io_start.elapsed());
 
     outfile.flush()?;
     println!("==============================");
-println!("Writer statistics");
-println!("Chunks written : {}", chunks_written);
-println!("Bytes written  : {}", bytes);
-println!("Writer time    : {:.3?}", io_start.elapsed());
-println!("==============================");
+    println!("Writer statistics");
+    println!("Chunks written : {}", chunks_written);
+    println!("Bytes written  : {}", bytes);
+    println!("Writer time    : {:.3?}", io_start.elapsed());
+    println!("==============================");
     println!("Writer finished.");
 
-    Ok((bytes,chunks_written))
+    Ok((bytes, chunks_written))
 }
-fn find_missing(
-    received: &[AtomicBool]
-) -> Vec<u32>
-{
-    let mut missing = Vec::with_capacity(4096);
 
-for (i, ok) in received.iter().enumerate() {
-    if !ok.load(Ordering::Acquire) {
-        missing.push(i as u32);
+/// Runs for the whole transfer on its own thread, reporting progress back to
+/// the sender every `ACK_INTERVAL_MS`. This is what replaces the old
+/// "wait for the entire transfer, then report everything missing" round
+/// trip - the sender now finds out about gaps within milliseconds instead
+/// of after the whole file has already gone out.
+fn ack_sender_thread(
+    mut stream: TcpStream,
+    received: Arc<Vec<AtomicBool>>,
+    expected_chunks: u32,
+) -> Result<()> {
+    let mut cursor: u32 = 0;
+
+    loop {
+        std::thread::sleep(Duration::from_millis(ACK_INTERVAL_MS));
+
+        // Advance the cumulative low-water mark as far as it'll go.
+        while cursor < expected_chunks && received[cursor as usize].load(Ordering::Acquire) {
+            cursor += 1;
+        }
+
+        if cursor >= expected_chunks {
+            stream.write_all(&protocol::encode_done())?;
+            stream.flush()?;
+            println!("All chunks received - sent Done.");
+            return Ok(());
+        }
+
+        // Only scan/report gaps within a bounded lookahead window so the
+        // ACK stays small even on multi-GB files - the sender's own window
+        // won't be sending much further ahead than this anyway.
+        let scan_end = expected_chunks.min(cursor + MISSING_LOOKAHEAD);
+        let mut missing = Vec::new();
+        for id in cursor..scan_end {
+            if !received[id as usize].load(Ordering::Acquire) {
+                missing.push(id);
+            }
+        }
+
+        stream.write_all(&protocol::encode_ack(cursor, &missing))?;
+        stream.flush()?;
     }
 }
 
-missing
-       
-}
 pub fn run() -> Result<()> {
     let overall_start = Instant::now();
     println!("==============================");
@@ -296,335 +213,149 @@ pub fn run() -> Result<()> {
     println!("==============================");
     //---------------- UDP ----------------//
 
-
-    let udp = UdpSocket::bind(
-    format!("{}:{}", HOST, DATA_PORT)
-)?;
-udp.set_read_timeout(Some(Duration::from_millis(100)))?;
-    use std::time::Duration;
-
+    let udp = UdpSocket::bind(format!("{}:{}", HOST, DATA_PORT))?;
+    udp.set_read_timeout(Some(Duration::from_millis(100)))?;
 
     use socket2::Socket;
-
     let socket = Socket::from(udp.try_clone()?);
-
     socket.set_recv_buffer_size(64 * 1024 * 1024)?;
 
     println!("Receiver bound to {}", udp.local_addr()?);
     println!("Waiting for UDP...");
-
     println!("Receiver UDP: {}", udp.local_addr()?);
-    
-    println!("Waiting for UDP packet...");
 
     //---------------- TCP ----------------//
 
-    let listener =
-        TcpListener::bind(
-            format!("{}:{}", HOST, KEY_PORT)
-        )?;
-
+    let listener = TcpListener::bind(format!("{}:{}", HOST, KEY_PORT))?;
     println!("Waiting for connection...");
 
-    let (mut stream, addr) =
-        listener.accept()?;
-
+    let (mut stream, addr) = listener.accept()?;
     println!("Connected to {}", addr);
-    println!("Connected to {}", addr);
-
-
 
     //---------------- RSA ----------------//
-println!("1");
-let private = RsaPrivateKey::new(&mut OsRng, 2048)?;
-println!("2");
+    let private = RsaPrivateKey::new(&mut OsRng, 2048)?;
+    let public = RsaPublicKey::from(&private);
+    let pem = public.to_public_key_pem(Default::default())?;
 
-let public = RsaPublicKey::from(&private);
-println!("3");
+    stream.write_all(&(pem.len() as u32).to_be_bytes())?;
+    stream.write_all(pem.as_bytes())?;
+    stream.flush()?;
 
-let pem = public.to_public_key_pem(Default::default())?;
-println!("4");
-
-println!("Sending public key length...");
-stream.write_all(&(pem.len() as u32).to_be_bytes())?;
-println!("5");
-
-println!("Sending public key...");
-stream.write_all(pem.as_bytes())?;
-stream.flush()?;
-println!("6");
-
-
-println!("Public key sent.");
+    println!("Public key sent.");
 
     //---------------- Receive AES Key ----------------//
-
-    let mut len=[0u8;4];
-
-
+    let mut len = [0u8; 4];
     stream.read_exact(&mut len)?;
+    let enc_len = u32::from_be_bytes(len) as usize;
 
-    let enc_len=
-        u32::from_be_bytes(len) as usize;
-
-    let mut encrypted=
-        vec![0u8;enc_len];
-
+    let mut encrypted = vec![0u8; enc_len];
     stream.read_exact(&mut encrypted)?;
 
-    let session_key_vec =
-    private.decrypt(
-        Oaep::new::<Sha256>(),
-        &encrypted,
-    )?;
+    let session_key_vec = private.decrypt(Oaep::new::<Sha256>(), &encrypted)?;
+    let session_key: [u8; 32] = session_key_vec.try_into().expect("Invalid AES key length");
 
-    let session_key: [u8; 32] =
-        session_key_vec
-            .try_into()
-            .expect("Invalid AES key length");
-
-    let mut nonce=[0u8;16];
-
+    let mut nonce = [0u8; 16];
     stream.read_exact(&mut nonce)?;
 
     println!("Handshake complete.");
+
     let mut chunk_buf = [0u8; 4];
-stream.read_exact(&mut chunk_buf)?;
+    stream.read_exact(&mut chunk_buf)?;
+    let expected_chunks = u32::from_be_bytes(chunk_buf);
 
-let expected_chunks =
-    u32::from_be_bytes(chunk_buf);
+    let mut size_buf = [0u8; 8];
+    stream.read_exact(&mut size_buf)?;
+    let expected_bytes = u64::from_be_bytes(size_buf);
 
-let mut size_buf = [0u8; 8];
-stream.read_exact(&mut size_buf)?;
+    println!("Expecting {} chunks", expected_chunks);
+    println!("Expected {:.2} MB", expected_bytes as f64 / (1024.0 * 1024.0));
+    println!("AES Key Size : {}", session_key.len());
 
-let expected_bytes =
-    u64::from_be_bytes(size_buf);
+    let start = Instant::now();
 
-println!(
-    "Expecting {} chunks",
-    expected_chunks
-);
+    let (packet_tx, packet_rx) = unbounded();
+    let (write_tx, write_rx) = unbounded();
 
-println!(
-    "Expected {:.2} MB",
-    expected_bytes as f64 /
-    (1024.0 * 1024.0)
-);
-
-    println!(
-        "AES Key Size : {}",
-        session_key.len()
+    let received = Arc::new(
+        (0..expected_chunks as usize)
+            .map(|_| AtomicBool::new(false))
+            .collect::<Vec<_>>(),
     );
+    let running = Arc::new(AtomicBool::new(true));
 
-let start = Instant::now();
+    let mut workers = Vec::new();
+    for _ in 0..NUM_WORKERS {
+        let rx = packet_rx.clone();
+        let tx = write_tx.clone();
+        let key = session_key;
+        let nonce = nonce;
 
-// unbounded() so receiver_thread's tx.send() never blocks and stalls
-// udp.recv_from() while the OS socket buffer overflows.
-let (packet_tx, packet_rx) = unbounded();
-let (write_tx, write_rx) = unbounded();
+        workers.push(std::thread::spawn(move || worker_thread(rx, tx, key, nonce)));
+    }
+    drop(write_tx);
 
+    let receive_start = Instant::now();
 
-// Receiver thread
+    let udp_receiver = udp.try_clone()?;
+    let packet_sender = packet_tx.clone();
+    let received_flags = received.clone();
+    let running_clone = running.clone();
 
-let received = Arc::new(
-    (0..expected_chunks as usize)
-        .map(|_| AtomicBool::new(false))
-        .collect::<Vec<_>>()
-);
-let running = Arc::new(AtomicBool::new(true));
-
-   
-// Worker threads
-let mut workers = Vec::new();
-
-for _ in 0..NUM_WORKERS {
-
-    let rx = packet_rx.clone();
-
-    let tx = write_tx.clone();
-
-    let key = session_key;
-
-    let nonce = nonce;
-
-    workers.push(
-        std::thread::spawn(move || {
-            worker_thread(
-                rx,
-                tx,
-                key,
-                nonce,
-            )
-        })
-    );
-}
-
-drop(write_tx);
-
-let receive_start = Instant::now();
-
-let mut round = 1;
-
-// ---------- Spawn ONE UDP receiver thread ----------
-let udp_receiver = udp.try_clone()?;
-
-let packet_sender = packet_tx.clone();
-
-let received_flags = received.clone();
-
-let running_clone = running.clone();
-
-let receiver_handle = std::thread::spawn(move || {
-
-receiver_thread(
-    udp_receiver,
-    packet_sender,
-    received_flags,
-    running_clone,
-)
-});
-
-// ---------- Writer thread ----------
-
-let writer_handle =
-    std::thread::spawn(move || {
-        writer_thread(
-            write_rx,
-            expected_bytes,
-            expected_chunks,
-        )
+    let receiver_handle = std::thread::spawn(move || {
+        receiver_thread(udp_receiver, packet_sender, received_flags, running_clone)
     });
-// Wait until sender has completed the initial UDP transfer
-let mut signal = [0u8; 1];
-stream.read_exact(&mut signal)?;
 
-if signal[0] != INITIAL_TRANSFER_COMPLETE {
-    anyhow::bail!("Invalid synchronization message");
-}
+    let writer_handle = std::thread::spawn(move || writer_thread(write_rx, expected_bytes, expected_chunks));
 
-// Allow any in-flight UDP packets to arrive
-std::thread::sleep(std::time::Duration::from_millis(50));
-loop {
+    // Dedicated thread that continuously reports progress back to the
+    // sender over TCP - this is the "adapts to any network" part. On a
+    // clean link it reports empty `missing` lists and the sender's window
+    // grows; the moment loss shows up it reports gaps within milliseconds
+    // and the sender's window backs off, instead of the old design where
+    // nothing was reported until the entire file had already been sent.
+    let ack_stream = stream.try_clone()?;
+    let ack_received = received.clone();
+    let ack_handle = std::thread::spawn(move || ack_sender_thread(ack_stream, ack_received, expected_chunks));
 
-    println!();
-    println!("========== Round {} ==========", round);
-
-    
-    
-let missing = find_missing(&received);
-
-println!("Missing chunks: {}", missing.len());
-
-if !missing.is_empty() {
-    println!(
-        "First few missing IDs: {:?}",
-        &missing[..missing.len().min(10)]
-    );
-}
-
-
-if missing.is_empty() {
-
-    println!("All chunks received.");
-
-    stream.write_all(&0u32.to_be_bytes())?;
+    // Blocks until the ack thread has told the sender it has everything.
+    ack_handle.join().unwrap()?;
 
     running.store(false, Ordering::Release);
+    drop(packet_tx);
 
-    break;
-}
-println!("Requesting retransmission...");
+    receiver_handle.join().unwrap()?;
+    println!("Receiver joined");
+    println!("Receive loop     : {:.3?}", receive_start.elapsed());
 
-// Send number of missing chunks
-stream.write_all(&(missing.len() as u32).to_be_bytes())?;
+    let worker_start = Instant::now();
+    for worker in workers {
+        worker.join().unwrap()?;
+    }
+    println!("Workers          : {:.3?}", worker_start.elapsed());
 
-// Build one buffer containing all IDs
-let mut id_buffer = Vec::with_capacity(missing.len() * 4);
+    let writer_start = Instant::now();
+    let (bytes_received, total_chunks) = writer_handle.join().unwrap()?;
+    println!("Writer           : {:.3?}", writer_start.elapsed());
 
-for id in &missing {
-    id_buffer.extend_from_slice(&id.to_be_bytes());
-}
+    println!();
+    println!("Expected Chunks : {}", expected_chunks);
+    println!("Received Chunks : {}", total_chunks);
+    println!("Expected Data   : {:.2} MB", expected_bytes as f64 / (1024.0 * 1024.0));
 
-// Send them all at once
-stream.write_all(&id_buffer)?;
-stream.flush()?;
-// Wait until sender has finished retransmitting
-let mut signal = [0u8; 1];
-stream.read_exact(&mut signal)?;
+    let elapsed = start.elapsed();
+    let seconds = elapsed.as_secs_f64();
+    let throughput = bytes_received as f64 / (1024.0 * 1024.0) / seconds;
 
-if signal[0] != RETRANSMISSION_COMPLETE {
-    anyhow::bail!("Expected retransmission complete");
-}
+    println!("Total receiver runtime: {:.3?}", overall_start.elapsed());
+    println!();
+    println!("==============================");
+    println!("Transfer Complete");
+    println!("==============================");
+    println!("Output File : reconstructed.bin");
+    println!("Chunks      : {}", total_chunks);
+    println!("Data        : {:.2} MB", bytes_received as f64 / (1024.0 * 1024.0));
+    println!("Time        : {:.3} s", seconds);
+    println!("Throughput  : {:.2} MB/s", throughput);
 
-round += 1;}
-println!("Dropping packet_tx");
-drop(packet_tx);   // <-- ADD IT HERE
-receiver_handle.join().unwrap()?;
-println!("Receiver joined");
-println!(
-    "Receive rounds  : {:.3?}",
-    receive_start.elapsed()
-);
-let worker_start = Instant::now();
-println!("Joining workers");
-// Wait for workers
-for worker in workers {
-    worker.join().unwrap()?;
-}
-println!(
-    "Workers         : {:.3?}",
-    worker_start.elapsed()
-);
-let writer_start = Instant::now();
-// Wait for writer
-let (bytes_received, total_chunks) =
-    writer_handle.join().unwrap()?;
-println!(
-    "Writer          : {:.3?}",
-    writer_start.elapsed()
-);
-println!();
-
-println!(
-    "Expected Chunks : {}",
-    expected_chunks
-);
-
-println!(
-    "Received Chunks : {}",
-    total_chunks
-);
-
-
-println!(
-    "Expected Data : {:.2} MB",
-    expected_bytes as f64 /
-    (1024.0 * 1024.0)
-);
-let elapsed = start.elapsed();
-
-let seconds = elapsed.as_secs_f64();
-
-let throughput =
-    bytes_received as f64
-        / (1024.0 * 1024.0)
-        / seconds;
-println!(
-    "Total receiver runtime: {:.3?}",
-    overall_start.elapsed()
-);
-println!();
-println!("==============================");
-println!("Transfer Complete");
-println!("==============================");
-println!("Output File : reconstructed.bin");
-println!("Chunks      : {}", total_chunks);
-println!(
-    "Data        : {:.2} MB",
-    bytes_received as f64 / (1024.0 * 1024.0)
-);
-println!("Time        : {:.3} s", seconds);
-println!("Throughput  : {:.2} MB/s", throughput);
-
-Ok(())
+    Ok(())
 }
