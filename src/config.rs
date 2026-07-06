@@ -29,4 +29,4 @@ pub const RETRANSMIT_BATCH_SIZE: usize = 4096;
 // initial burst in parallel. Each pulls encrypted chunks off the same
 // queue and sends on its own socket. Try 2-4; more isn't necessarily
 // better if the link itself is the bottleneck rather than the sender.
-pub const NUM_SENDER_STREAMS: usize = 3;
+pub const NUM_SENDER_STREAMS: usize = 1;
