@@ -24,7 +24,7 @@ use std::{
 
 use crate::{
     checksum,
-    config::{CHUNK_SIZE, DATA_PORT, RECEIVER_IP, KEY_PORT,WINDOW_SIZE},
+    config::{CHUNK_SIZE, DATA_PORT, RECEIVER_IP, KEY_PORT, WINDOW_SIZE, NUM_SENDER_STREAMS},
     crypto,
 };
 
@@ -184,19 +184,18 @@ println!(
 }
 
 fn sender_thread(
+    stream_id: usize,
     udp: UdpSocket,
     rx: Receiver<EncryptedChunk>,
-    total_chunks: usize,
-) -> Result<(u64, Vec<Vec<u8>>)>{
+) -> Result<(u64, Vec<(u32, Vec<u8>)>)>{
 
         let mut bytes_sent: u64 = 0;
         let mut send_time = std::time::Duration::ZERO;
         let mut packets_sent = 0u64;
-        let mut packet_cache = vec![Vec::new(); total_chunks];  
+        let mut local_cache: Vec<(u32, Vec<u8>)> = Vec::new();
         let mut transport = TransportState::new();
-        let mut last_chunk = 0u32;
         let mut next_print: u64 = 500 * 1024 * 1024;
-        println!("Sender thread started");
+        println!("Sender stream {} started", stream_id);
        while let Ok(chunk) = rx.recv() {
 
 transport.queue_packet(
@@ -227,17 +226,16 @@ while transport.can_send() {
 
     send_time += t.elapsed();
 
-    packet_cache[chunk_id as usize] = packet;
+    local_cache.push((chunk_id, packet));
 
     bytes_sent += bytes as u64;
-
-    last_chunk = last_chunk.max(chunk_id);
 }
    
     if bytes_sent >= next_print {
 
         println!(
-            "Sent {:.2} MB",
+            "Stream {} sent {:.2} MB",
+            stream_id,
             bytes_sent as f64 /
             (1024.0 * 1024.0)
         );
@@ -246,15 +244,14 @@ while transport.can_send() {
     }
 }
 
-println!("Sender channel closed");
+println!("Sender stream {} channel closed", stream_id);
       
         println!("==============================");
-println!("Sender statistics");
+println!("Sender stream {} statistics", stream_id);
 println!("Packets sent : {}", packets_sent);
 println!("send() time  : {:.3?}", send_time);
 println!("==============================");
-        println!("Total send_to() time: {:.3?}", send_time);
-        Ok((bytes_sent, packet_cache))
+        Ok((bytes_sent, local_cache))
     }
     fn handshake(&mut self) -> Result<()> {
         println!("Waiting for receiver public key...");
@@ -309,7 +306,6 @@ let (send_tx, send_rx) = unbounded();
     let key = self.session_key;
     let nonce = self.nonce;
 
-    let udp = self.udp.try_clone()?;
     let mut control = self.tcp.try_clone()?;
 
     // Reader
@@ -345,16 +341,42 @@ let (send_tx, send_rx) = unbounded();
     }
 
     drop(send_tx);
-    
-    // Sender
-    let sender =
-        std::thread::spawn(move || {
-            Self::sender_thread(
-    udp,
-    send_rx,
-    total_chunks,
-)
-        });
+
+    // Sender streams - multiple independent UDP sockets, each on its
+    // own thread, all pulling encrypted chunks off the same queue.
+    // This is the parallel-transmission experiment: a single socket/
+    // thread serializes every udp.send() call, so if the OS/driver
+    // path (not just the raw radio link) is part of the bottleneck,
+    // spreading sends across streams can improve throughput. If the
+    // link itself is fully saturated already, this won't help much -
+    // that's the thing we're testing.
+    use socket2::SockRef;
+
+    let mut senders = Vec::new();
+
+    for stream_id in 0..NUM_SENDER_STREAMS {
+
+        let rx = send_rx.clone();
+
+        let udp = UdpSocket::bind("0.0.0.0:0")?;
+        udp.connect(format!("{}:{}", RECEIVER_IP, DATA_PORT))?;
+        SockRef::from(&udp).set_send_buffer_size(64 * 1024 * 1024)?;
+        udp.set_nonblocking(false)?;
+
+        println!("Sender stream {} UDP: {}", stream_id, udp.local_addr()?);
+
+        senders.push(
+            std::thread::spawn(move || {
+                Self::sender_thread(
+                    stream_id,
+                    udp,
+                    rx,
+                )
+            })
+        );
+    }
+
+    drop(send_rx);
 
     reader.join().unwrap()?;
 
@@ -362,7 +384,19 @@ let (send_tx, send_rx) = unbounded();
         worker.join().unwrap()?;
     }
 
-    sender.join().unwrap()
+    let mut bytes_sent = 0u64;
+    let mut packet_cache = vec![Vec::new(); total_chunks];
+
+    for sender in senders {
+        let (stream_bytes, stream_cache) = sender.join().unwrap()?;
+        bytes_sent += stream_bytes;
+
+        for (chunk_id, packet) in stream_cache {
+            packet_cache[chunk_id as usize] = packet;
+        }
+    }
+
+    Ok((bytes_sent, packet_cache))
 }
 
    
@@ -502,4 +536,3 @@ let throughput =
     Ok(())
 }
 }
-

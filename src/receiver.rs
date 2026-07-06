@@ -418,12 +418,8 @@ println!(
 
 let start = Instant::now();
 
-// NOTE: switched back from bounded(4096) to unbounded().
-// bounded() made receiver_thread's tx.send() block whenever the
-// worker/writer stage fell behind (e.g. a disk write stall), which
-// stopped it from calling udp.recv_from() and let the OS UDP buffer
-// overflow -> massive burst packet loss. unbounded() removes that
-// backpressure so the UDP-draining thread never blocks.
+// unbounded() so receiver_thread's tx.send() never blocks and stalls
+// udp.recv_from() while the OS socket buffer overflows.
 let (packet_tx, packet_rx) = unbounded();
 let (write_tx, write_rx) = unbounded();
 

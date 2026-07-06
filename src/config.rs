@@ -5,7 +5,7 @@ pub const DATA_PORT: u16 = 5000;
 
 pub const KEY_PORT: u16 = 5001;
 
-pub const CHUNK_SIZE: usize = 32768;
+pub const CHUNK_SIZE: usize = 32769;
 
 pub const NUM_WORKERS: usize = 4;
 
@@ -24,3 +24,9 @@ pub const ACK_INTERVAL: u32 = 128;
 pub const RETRANSMIT_TIMEOUT_MS: u64 = 25;
 pub const WINDOW_SIZE: usize = 512;
 pub const RETRANSMIT_BATCH_SIZE: usize = 1024;
+
+// Number of independent UDP sockets/threads used to transmit the
+// initial burst in parallel. Each pulls encrypted chunks off the same
+// queue and sends on its own socket. Try 2-4; more isn't necessarily
+// better if the link itself is the bottleneck rather than the sender.
+pub const NUM_SENDER_STREAMS: usize = 3;
