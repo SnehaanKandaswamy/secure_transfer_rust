@@ -225,7 +225,7 @@ while transport.can_send() {
     // is killing the connection on this network, without adding the
     // full sleep cost to every packet. Tune BATCH/PAUSE_MS below -
     // bigger BATCH / smaller PAUSE_MS = faster but burstier.
-    const BATCH: u64 = 512;
+    const BATCH: u64 = 1024;
     const PAUSE_MS: u64 = 1;
     if packets_sent % BATCH == 0 {
         std::thread::sleep(std::time::Duration::from_millis(PAUSE_MS));
