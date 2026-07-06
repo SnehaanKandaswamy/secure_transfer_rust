@@ -66,8 +66,12 @@ pub const MIN_RESEND_INTERVAL_MS: u64 = 40;
 // How far past the receiver's cumulative "highest contiguous" point it
 // scans for gaps to report each round. Keeps ACK packets small and
 // focused on the currently-active window instead of listing every
-// not-yet-sent chunk in a multi-GB file.
-pub const MISSING_LOOKAHEAD: u32 = 8192;
+// not-yet-sent chunk in a multi-GB file. Kept close to the sender's
+// actual window size (a few hundred packets) - a much larger value here
+// was reporting thousands of ids that simply hadn't been sent yet as
+// "missing", bloating every ACK to tens of KB and risking a blocked TCP
+// write if the sender's ACK reader ever fell slightly behind.
+pub const MISSING_LOOKAHEAD: u32 = 512;
 
 // Number of independent UDP sockets/threads used to transmit the
 // initial burst in parallel. Each pulls encrypted chunks off the same
