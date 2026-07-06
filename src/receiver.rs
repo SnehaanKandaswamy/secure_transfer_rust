@@ -62,9 +62,17 @@ while running.load(Ordering::Acquire) {
         match udp.recv_from(&mut buffer) {
             
             Ok((size, _)) => {
-                 recv_time += t.elapsed();
-                 packets += 1;
+                
+recv_time += t.elapsed();
+packets += 1;
 
+if packets % 1000 == 0 {
+    println!("Received {} packets", packets);
+}
+
+if size < 16 {
+    continue;
+}
 
                 if size < 16 {
                     
