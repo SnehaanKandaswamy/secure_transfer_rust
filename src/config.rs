@@ -22,7 +22,7 @@ pub const ACK_INTERVAL: u32 = 128;
 // Retransmit if we haven't heard an ACK
 // for this long.
 pub const RETRANSMIT_TIMEOUT_MS: u64 = 25;
-pub const WINDOW_SIZE: usize = 512;
+pub const WINDOW_SIZE: usize = 256;
 pub const RETRANSMIT_BATCH_SIZE: usize = 1024;
 
 // Number of independent UDP sockets/threads used to transmit the
