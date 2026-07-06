@@ -1,10 +1,14 @@
 //BEST
 use anyhow::Result;
-use std::time::{Duration, Instant};
-
+use std::time::Instant;
 use rand::{rngs::OsRng, RngCore};
-use rsa::{pkcs8::DecodePublicKey, Oaep, RsaPublicKey};
+use rsa::{
+    pkcs8::DecodePublicKey,
+    Oaep,
+    RsaPublicKey,
+};
 use sha2::Sha256;
+use std::collections::{HashMap, HashSet};
 
 use std::{
     io::{Read, Write},
@@ -12,13 +16,21 @@ use std::{
 };
 
 use crate::{
-    config::{CHUNK_SIZE, DATA_PORT, KEY_PORT, RECEIVER_IP},
-    crypto, protocol,
+    checksum,
+    config::{CHUNK_SIZE, DATA_PORT, RECEIVER_IP, KEY_PORT, PACKETS_PER_BLOCK, PIPELINE_DEPTH},
+    crypto,
 };
 
-use crossbeam_channel::{unbounded, Receiver, Sender as ChannelSender, TryRecvError};
+use crossbeam_channel::{bounded, Receiver, Sender as ChannelSender};
 
-use crate::pipeline::{EncryptedChunk, ReadChunk, NUM_WORKERS};
+use crate::pipeline::{
+    ReadChunk,
+    EncryptedChunk,
+    NUM_WORKERS,
+};
+
+use crate::protocol::{DataPacket, BlockEndPacket, BlockAck};
+use crate::transport::{SharedBlockCache, block_of, packets_in_block, total_blocks};
 
 pub struct Sender {
     tcp: TcpStream,
@@ -30,18 +42,18 @@ pub struct Sender {
     filename: String,
 }
 
-use crate::transport::TransportState;
-
 impl Sender {
     pub fn new(filename: &str) -> Result<Self> {
-        let tcp = TcpStream::connect(format!("{}:{}", RECEIVER_IP, KEY_PORT))?;
-        tcp.set_nodelay(true)?;
+        let tcp = TcpStream::connect(
+            format!("{}:{}", RECEIVER_IP, KEY_PORT),
+        )?;
 
         let udp = UdpSocket::bind("0.0.0.0:0")?;
         udp.connect(format!("{}:{}", RECEIVER_IP, DATA_PORT))?;
         use socket2::SockRef;
 
-        SockRef::from(&udp).set_send_buffer_size(64 * 1024 * 1024)?;
+        SockRef::from(&udp)
+            .set_send_buffer_size(64 * 1024 * 1024)?;
         println!("Sender UDP: {}", udp.local_addr()?);
         udp.set_nonblocking(false)?;
 
@@ -60,7 +72,16 @@ impl Sender {
         })
     }
 
-    fn reader_thread(filename: String, tx: ChannelSender<ReadChunk>) -> Result<()> {
+    // ------------------------------------------------------------------
+    // Reader thread -- UNCHANGED. Reads the file sequentially into
+    // CHUNK_SIZE pieces and hands them to the encryption workers. Block
+    // framing happens downstream in worker_thread, so this doesn't need to
+    // know anything about blocks.
+    // ------------------------------------------------------------------
+    fn reader_thread(
+        filename: String,
+        tx: ChannelSender<ReadChunk>,
+    ) -> Result<()> {
         use std::fs::File;
         use std::io::Read;
 
@@ -81,7 +102,12 @@ impl Sender {
 
             buffer.truncate(bytes);
 
-            tx.send(ReadChunk { chunk_id, data: buffer })?;
+            tx.send(
+                ReadChunk {
+                    chunk_id,
+                    data: buffer,
+                }
+            )?;
 
             chunk_id += 1;
         }
@@ -93,6 +119,13 @@ impl Sender {
         Ok(())
     }
 
+    // ------------------------------------------------------------------
+    // Encryption workers -- crypto and checksum logic UNCHANGED. The only
+    // difference from the old version is the wire header built around the
+    // encrypted payload: it now carries (block_id, packet_in_block)
+    // instead of a flat chunk_id, via DataPacket::encode. The global
+    // chunk_id used for the AES-CTR counter is untouched.
+    // ------------------------------------------------------------------
     fn worker_thread(
         rx: Receiver<ReadChunk>,
         tx: ChannelSender<EncryptedChunk>,
@@ -106,25 +139,35 @@ impl Sender {
         while let Ok(chunk) = rx.recv() {
             let t = Instant::now();
 
-            let encrypted = crypto::encrypt_chunk(&chunk.data, &key, &nonce, chunk.chunk_id);
+            let encrypted = crypto::encrypt_chunk(
+                &chunk.data,
+                &key,
+                &nonce,
+                chunk.chunk_id,
+            );
 
             encrypt_time += t.elapsed();
             chunks += 1;
 
-            let hash = checksum_of(&chunk.data);
+            let hash =
+                checksum::chunk_hash(&chunk.data);
 
-            let mut packet = Vec::with_capacity(16 + encrypted.len());
+            let (block_id, packet_in_block) = block_of(chunk.chunk_id);
 
-            packet.extend_from_slice(&chunk.chunk_id.to_be_bytes());
-            packet.extend_from_slice(&(encrypted.len() as u32).to_be_bytes());
-            packet.extend_from_slice(&hash.to_be_bytes());
-            packet.extend_from_slice(&encrypted);
+            let packet = DataPacket::encode(
+                block_id,
+                packet_in_block,
+                hash,
+                &encrypted,
+            );
 
-            tx.send(EncryptedChunk {
-                chunk_id: chunk.chunk_id,
-                packet,
-                bytes: chunk.data.len(),
-            })?;
+            tx.send(
+                EncryptedChunk {
+                    chunk_id: chunk.chunk_id,
+                    packet,
+                    bytes: chunk.data.len(),
+                }
+            )?;
         }
         println!(
             "Worker {:?}: {} chunks | encrypt {:?}",
@@ -132,201 +175,294 @@ impl Sender {
             chunks,
             encrypt_time
         );
-        println!("Worker total lifetime: {:?}", worker_start.elapsed());
+
+        println!(
+            "Worker total lifetime: {:?}",
+            worker_start.elapsed()
+        );
         println!("Worker finished");
         Ok(())
     }
 
-    /// The core of the redesign: one continuous loop that both sends new
-    /// data and repairs loss, gated by an adaptive sliding window instead of
-    /// a fixed pacing sleep.
-    ///
-    /// It merges three event sources every iteration:
-    ///   1. Freshly encrypted chunks from the pipeline (subject to `cwnd`)
-    ///   2. Progress reports from the receiver (grow/shrink window, resend
-    ///      specific missing ids immediately)
-    ///   3. Locally-detected timeouts (resend if an ACK itself was lost)
-    ///
-    /// It exits once the receiver has confirmed it has every chunk.
-    fn send_and_repair(
+    // ------------------------------------------------------------------
+    // Block-pipelined send loop (Pipeline Manager + UDP Sender stages).
+    //
+    // Sends every packet in a block back-to-back with no sleeps and no
+    // pacing. Once it has sent every packet currently belonging to a
+    // block, it emits a BlockEnd datagram for that block. The only place
+    // this loop ever waits is `permits_rx.recv()`, which blocks *only*
+    // when PIPELINE_DEPTH blocks are already open and unconfirmed -- i.e.
+    // genuine backpressure from outstanding repairs, never a fixed timer.
+    // ------------------------------------------------------------------
+    fn block_sender_loop(
         udp: UdpSocket,
-        chunk_rx: Receiver<EncryptedChunk>,
-        ack_rx: Receiver<protocol::ControlMessage>,
-        total_chunks: usize,
-    ) -> Result<(u64, u32)> {
-        let mut bytes_sent: u64 = 0;
+        rx: Receiver<EncryptedChunk>,
+        total_chunks: u32,
+        cache: SharedBlockCache,
+        permits_rx: Receiver<()>,
+    ) -> Result<u64> {
+        let mut bytes_sent = 0u64;
         let mut packets_sent = 0u64;
-        let mut retransmitted = 0u64;
-        let mut packet_cache: Vec<Vec<u8>> = vec![Vec::new(); total_chunks];
-        let mut transport = TransportState::new();
-        let mut pipeline_done = false;
-        let mut receiver_done = false;
+        let mut opened_blocks: HashSet<u32> = HashSet::new();
+        let mut sent_counts: HashMap<u32, usize> = HashMap::new();
         let mut next_print: u64 = 500 * 1024 * 1024;
 
-        println!("Sender transport loop started (initial window = {})", transport.cwnd);
+        println!("Block sender thread started");
 
-        // A single UDP send failure (transient OS/network hiccup, brief
-        // ICMP unreachable, AV interference, etc.) used to be treated as
-        // fatal via `?`, which killed the entire transfer over one bad
-        // packet. UDP sends are expected to occasionally fail - that's the
-        // whole reason this protocol retries - so log and move on instead;
-        // the retransmit/timeout logic already covers the lost packet.
-        let udp_send = |udp: &UdpSocket, packet: &[u8]| -> bool {
-            match udp.send(packet) {
-                Ok(_) => true,
-                Err(e) => {
-                    eprintln!("udp send failed (non-fatal, will retry): {e}");
-                    false
-                }
-            }
-        };
+        while let Ok(chunk) = rx.recv() {
+            let (block_id, packet_in_block) = block_of(chunk.chunk_id);
+            let block_total = packets_in_block(block_id, total_chunks);
 
-        let mut last_window_print = Instant::now();
-
-        loop {
-            let mut did_work = false;
-
-            // 1. Drain every ACK/Done message currently available - react
-            // immediately rather than batching, since these are what drive
-            // both retransmission and window sizing.
-            loop {
-                match ack_rx.try_recv() {
-                    Ok(protocol::ControlMessage::Ack { highest_contiguous, acked, missing }) => {
-                        did_work = true;
-                        let to_resend = transport.on_ack(highest_contiguous, &acked, &missing);
-                        for id in to_resend {
-                            if let Some(packet) = packet_cache.get(id as usize) {
-                                if !packet.is_empty() {
-                                    if udp_send(&udp, packet) {
-                                        retransmitted += 1;
-                                    }
-                                    transport.mark_retransmitted(id);
-                                }
-                            }
-                        }
-                    }
-                    Ok(protocol::ControlMessage::Done) => {
-                        did_work = true;
-                        receiver_done = true;
-                    }
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => break,
-                }
+            if !opened_blocks.contains(&block_id) {
+                // Backpressure gate: wait for a free pipeline slot. Under
+                // normal conditions this never blocks because blocks keep
+                // completing continuously; it only engages when repairs
+                // are genuinely lagging.
+                permits_rx.recv()?;
+                opened_blocks.insert(block_id);
+                sent_counts.insert(block_id, 0);
             }
 
-            if receiver_done {
-                println!("Receiver confirmed it has every chunk.");
-                break;
-            }
+            udp.send(&chunk.packet)?;
+            packets_sent += 1;
+            bytes_sent += chunk.bytes as u64;
 
-            // 2. Resend anything whose ACK may itself have been lost.
-            for id in transport.timed_out() {
-                if let Some(packet) = packet_cache.get(id as usize) {
-                    if !packet.is_empty() {
-                        if udp_send(&udp, packet) {
-                            retransmitted += 1;
-                        }
-                        did_work = true;
-                    }
-                }
-            }
+            // Cache takes ownership of the datagram bytes for potential
+            // retransmission; we've already sent it above.
+            cache.record_sent(block_id, packet_in_block, block_total, chunk.packet);
 
-            // 3. Keep draining freshly encrypted chunks into `pending`
-            // until either the channel runs dry or `pending` has a healthy
-            // buffer queued up. Pulling only a single chunk here (the old
-            // behavior) meant this branch never ran again once `pending`
-            // had even one item left in it - so once the window filled up
-            // (inflight == cwnd, so step 4 stopped draining `pending`),
-            // this stopped draining `chunk_rx` too, workers blocked trying
-            // to send into a full channel, and the reader blocked behind
-            // them. Draining up to a cap keeps `pending` topped up
-            // regardless of whether the window happens to be full right
-            // now.
-            const PENDING_TARGET: usize = 512;
-            while transport.pending.len() < PENDING_TARGET && !pipeline_done {
-                match chunk_rx.try_recv() {
-                    Ok(chunk) => {
-                        transport.queue_packet(chunk.chunk_id, chunk.packet, chunk.bytes);
-                        did_work = true;
-                    }
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => {
-                        pipeline_done = true;
-                        break;
-                    }
-                }
-            }
+            let count = sent_counts.get_mut(&block_id).unwrap();
+            *count += 1;
 
-            // 4. Send everything the window currently allows.
-            while transport.can_send() {
-                let Some((chunk_id, packet, bytes)) = transport.next_pending() else {
-                    break;
-                };
-
-                udp_send(&udp, &packet);
-                packets_sent += 1;
-                did_work = true;
-
-                transport.mark_sent(chunk_id);
-
-                packet_cache[chunk_id as usize] = packet;
-                bytes_sent += bytes as u64;
+            if *count == block_total {
+                let end = BlockEndPacket::encode(block_id, block_total as u32);
+                udp.send(&end)?;
             }
 
             if bytes_sent >= next_print {
-                println!("Sent {:.2} MB (window = {})", bytes_sent as f64 / (1024.0 * 1024.0), transport.cwnd);
-                next_print += 500 * 1024 * 1024;
-            }
-
-            if last_window_print.elapsed() > Duration::from_secs(2) {
                 println!(
-                    "window={} inflight={} pending={}",
-                    transport.cwnd,
-                    transport.inflight.len(),
-                    transport.pending.len()
+                    "Sent {:.2} MB",
+                    bytes_sent as f64 / (1024.0 * 1024.0)
                 );
-                last_window_print = Instant::now();
-            }
-
-            if !did_work {
-                // Nothing to do right now - avoid busy-spinning the CPU
-                // while we wait for the next ACK, timeout, or chunk.
-                std::thread::sleep(Duration::from_micros(500));
+                next_print += 500 * 1024 * 1024;
             }
         }
 
         println!("==============================");
-        println!("Sender statistics");
-        println!("Packets sent      : {}", packets_sent);
-        println!("Packets resent    : {}", retransmitted);
-        println!("Final window size : {}", transport.cwnd);
+        println!("Block sender statistics");
+        println!("Packets sent : {}", packets_sent);
+        println!("Blocks opened: {}", opened_blocks.len());
         println!("==============================");
 
-        Ok((bytes_sent, packets_sent as u32))
+        Ok(bytes_sent)
+    }
+
+    // ------------------------------------------------------------------
+    // Control-ack listener. Runs concurrently with block_sender_loop (not
+    // as a separate phase afterwards) so that repairing an early block
+    // never stalls later blocks from being sent. Reacts to two message
+    // types from the receiver:
+    //   - Missing: retransmit exactly the requested packets for that block.
+    //   - Complete: free that block's cache and return a pipeline permit.
+    // Stops once every block has been confirmed complete.
+    // ------------------------------------------------------------------
+    fn control_ack_loop(
+        mut control: TcpStream,
+        udp: UdpSocket,
+        cache: SharedBlockCache,
+        permits_tx: ChannelSender<()>,
+        total_blocks: u32,
+    ) -> Result<()> {
+        let mut completed = 0u32;
+        let mut retransmitted = 0u64;
+        let start = Instant::now();
+
+        println!("Control-ack loop started, awaiting {} block(s)", total_blocks);
+
+        while completed < total_blocks {
+            let ack = BlockAck::read_from(&mut control)?;
+
+            match ack {
+                BlockAck::Missing { block_id, missing } => {
+                    let packets = cache.fetch_for_retransmit(block_id, &missing);
+                    for packet in &packets {
+                        udp.send(packet)?;
+                        retransmitted += 1;
+                    }
+                }
+                BlockAck::Complete { block_id } => {
+                    cache.complete(block_id);
+                    completed += 1;
+                    // Return a slot to the pipeline. If the sender loop has
+                    // already finished and dropped its receiver (shouldn't
+                    // happen before this loop exits, but stay defensive),
+                    // just ignore the send failure.
+                    let _ = permits_tx.send(());
+                }
+            }
+        }
+
+        println!(
+            "Control-ack loop: all {} block(s) confirmed complete in {:.3?} ({} packets retransmitted).",
+            total_blocks,
+            start.elapsed(),
+            retransmitted
+        );
+
+        Ok(())
     }
 
     fn handshake(&mut self) -> Result<()> {
         println!("Waiting for receiver public key...");
 
         let mut len = [0u8; 4];
+
         self.tcp.read_exact(&mut len)?;
+
         let key_len = u32::from_be_bytes(len) as usize;
 
         let mut pem = vec![0u8; key_len];
+
         self.tcp.read_exact(&mut pem)?;
+
         let pem = String::from_utf8(pem)?;
 
-        let public = RsaPublicKey::from_public_key_pem(&pem)?;
+        let public =
+            RsaPublicKey::from_public_key_pem(&pem)?;
+
         println!("Public key received.");
 
-        let encrypted = public.encrypt(&mut OsRng, Oaep::new::<Sha256>(), &self.session_key)?;
+        let encrypted =
+            public.encrypt(
+                &mut OsRng,
+                Oaep::new::<Sha256>(),
+                &self.session_key,
+            )?;
 
-        self.tcp.write_all(&(encrypted.len() as u32).to_be_bytes())?;
+        self.tcp.write_all(
+            &(encrypted.len() as u32).to_be_bytes(),
+        )?;
+
         self.tcp.write_all(&encrypted)?;
+
         self.tcp.write_all(&self.nonce)?;
 
         println!("Handshake complete.");
         Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // Orchestrates reader -> encryption workers -> block sender, plus a
+    // concurrent control-ack listener that handles repairs and completion
+    // as they happen (rather than as a separate phase after the initial
+    // blast, as the old transport did).
+    // ------------------------------------------------------------------
+    fn send_file(
+        &mut self,
+        total_chunks: u32,
+    ) -> Result<u64> {
+        println!("Opening file...");
+
+        // Bounded, not unbounded: this is what keeps memory usage constant
+        // regardless of file size. Capacity is sized generously relative
+        // to the pipeline window so the reader/encryption stages can stay
+        // ahead of the network without effectively caching the whole file.
+        let channel_capacity = PIPELINE_DEPTH * PACKETS_PER_BLOCK * 2;
+        let (read_tx, read_rx) = bounded::<ReadChunk>(channel_capacity);
+        let (send_tx, send_rx) = bounded::<EncryptedChunk>(channel_capacity);
+
+        let filename = self.filename.clone();
+
+        let key = self.session_key;
+        let nonce = self.nonce;
+
+        let udp_send = self.udp.try_clone()?;
+        let udp_control = self.udp.try_clone()?;
+        let control_stream = self.tcp.try_clone()?;
+
+        let cache = SharedBlockCache::new();
+
+        // Semaphore-style permit channel: pre-loaded with PIPELINE_DEPTH
+        // tokens. Opening a new block consumes one; confirming a block
+        // complete returns one. This is the entire flow-control mechanism
+        // for the transport -- no cwnd, no per-packet timers.
+        let (permits_tx, permits_rx) = bounded::<()>(PIPELINE_DEPTH);
+        for _ in 0..PIPELINE_DEPTH {
+            permits_tx.send(())?;
+        }
+
+        let total_blocks_count = total_blocks(total_chunks);
+
+        // Reader
+        let reader = std::thread::spawn(move || {
+            Self::reader_thread(
+                filename,
+                read_tx,
+            )
+        });
+
+        // Encryption workers
+        let mut workers = Vec::new();
+
+        for _ in 0..NUM_WORKERS {
+            let rx = read_rx.clone();
+            let tx = send_tx.clone();
+            let key = key;
+            let nonce = nonce;
+
+            workers.push(
+                std::thread::spawn(move || {
+                    Self::worker_thread(
+                        rx,
+                        tx,
+                        key,
+                        nonce,
+                    )
+                })
+            );
+        }
+
+        drop(send_tx);
+
+        // Control-ack listener -- runs concurrently with the block sender.
+        let cache_for_control = cache.clone();
+        let control_handle = std::thread::spawn(move || {
+            Self::control_ack_loop(
+                control_stream,
+                udp_control,
+                cache_for_control,
+                permits_tx,
+                total_blocks_count,
+            )
+        });
+
+        // Block-pipelined sender
+        let sender_cache = cache.clone();
+        let sender_handle = std::thread::spawn(move || {
+            Self::block_sender_loop(
+                udp_send,
+                send_rx,
+                total_chunks,
+                sender_cache,
+                permits_rx,
+            )
+        });
+
+        reader.join().unwrap()?;
+
+        for worker in workers {
+            worker.join().unwrap()?;
+        }
+
+        let bytes_sent = sender_handle.join().unwrap()?;
+
+        // Blocks until every block has been confirmed complete, handling
+        // repairs as they arrive. This replaces the old sequential
+        // "retransmission phase" -- repairs now happen throughout the
+        // transfer instead of only after the entire file has been blasted.
+        control_handle.join().unwrap()?;
+
+        Ok(bytes_sent)
     }
 
     pub fn run(&mut self) -> Result<()> {
@@ -339,78 +475,45 @@ impl Sender {
         let file_size = std::fs::metadata(&self.filename)?.len();
 
         let total_chunks = file_size.div_ceil(CHUNK_SIZE as u64) as u32;
-        self.tcp.write_all(&total_chunks.to_be_bytes())?;
-        self.tcp.write_all(&file_size.to_be_bytes())?;
+        self.tcp.write_all(
+            &total_chunks.to_be_bytes()
+        )?;
 
-        // Dedicated thread that just reads the receiver's continuous
-        // progress reports off TCP and hands them to the transport loop.
-        // Running this on its own thread is what lets the sender react to
-        // loss/ACKs *while* still pumping data, instead of the old
-        // "send everything, then find out what's missing" split.
-        let (ack_tx, ack_rx) = unbounded();
-        let mut ack_stream = self.tcp.try_clone()?;
-        let ack_reader = std::thread::spawn(move || -> Result<()> {
-            loop {
-                let msg = protocol::read_control_message(&mut ack_stream)?;
-                let is_done = matches!(msg, protocol::ControlMessage::Done);
-                ack_tx.send(msg)?;
-                if is_done {
-                    break;
-                }
-            }
-            Ok(())
-        });
+        self.tcp.write_all(
+            &file_size.to_be_bytes()
+        )?;
 
         let transfer_start = Instant::now();
 
-        let (read_tx, read_rx) = unbounded();
-        let (send_tx, send_rx) = unbounded();
+        let bytes_sent = self.send_file(total_chunks)?;
 
-        let filename = self.filename.clone();
-        let key = self.session_key;
-        let nonce = self.nonce;
-        let udp = self.udp.try_clone()?;
+        println!(
+            "Transfer (send + all repairs): {:.3?}",
+            transfer_start.elapsed()
+        );
 
-        let reader = std::thread::spawn(move || Self::reader_thread(filename, read_tx));
-
-        let mut workers = Vec::new();
-        for _ in 0..NUM_WORKERS {
-            let rx = read_rx.clone();
-            let tx = send_tx.clone();
-            let key = key;
-            let nonce = nonce;
-            workers.push(std::thread::spawn(move || Self::worker_thread(rx, tx, key, nonce)));
-        }
-        drop(send_tx);
-
-        let (bytes_sent, packets_sent) =
-            Self::send_and_repair(udp, send_rx, ack_rx, total_chunks as usize)?;
-
-        reader.join().unwrap()?;
-        for worker in workers {
-            worker.join().unwrap()?;
-        }
-        ack_reader.join().unwrap()?;
-
-        println!("Transfer loop: {:.3?}", transfer_start.elapsed());
+        println!(
+            "Total sender runtime: {:.3?}",
+            start.elapsed()
+        );
 
         let elapsed = start.elapsed();
         let seconds = elapsed.as_secs_f64();
-        let throughput = bytes_sent as f64 / (1024.0 * 1024.0) / seconds;
+
+        let throughput =
+            bytes_sent as f64
+                / (1024.0 * 1024.0)
+                / seconds;
 
         println!();
         println!("==============================");
         println!("Transfer Complete");
         println!("==============================");
-        println!("Time Taken   : {:.3} s", seconds);
-        println!("Data Sent    : {:.2} MB", bytes_sent as f64 / (1024.0 * 1024.0));
-        println!("Packets Sent : {}", packets_sent);
-        println!("Throughput   : {:.2} MB/s", throughput);
+        println!("Time Taken : {:.3} s", seconds);
+        println!("Data Sent  : {:.2} MB",
+            bytes_sent as f64 / (1024.0 * 1024.0));
+        println!("Throughput : {:.2} MB/s", throughput);
 
         Ok(())
     }
-}
-
-fn checksum_of(data: &[u8]) -> u64 {
-    crate::checksum::chunk_hash(data)
 }

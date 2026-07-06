@@ -1,112 +1,189 @@
-use anyhow::{bail, Result};
-use serde::{Deserialize, Serialize};
-use std::io::Read;
+//! Wire formats for the block-pipelined transport.
+//!
+//! Two channels carry two different kinds of messages:
+//!
+//! - UDP (fast, unreliable): `DataPacket`s carrying encrypted file data, and
+//!   `BlockEndPacket`s marking the end of a block's initial transmission.
+//!   Every UDP datagram starts with a one-byte tag so the receiver can tell
+//!   the two apart without guessing from size alone.
+//! - TCP (slow, reliable, low-frequency): `BlockAck` messages carrying
+//!   either "these packet ids are missing" or "this block is complete".
+//!   TCP's reliability is a good fit here specifically because these
+//!   messages are rare (one or two per block) -- using it for the bulk data
+//!   itself would reintroduce head-of-line blocking, which is why data
+//!   stays on UDP.
 
-#[derive(Serialize, Deserialize, Debug)]
-pub struct DataPacket {
-    pub chunk_id: u32,
-    pub encrypted_size: u32,
-    pub hash: u64,
-    pub encrypted: Vec<u8>,
-}
+use std::io::{self, Read, Write};
 
-#[derive(Serialize, Deserialize, Debug)]
-pub struct FinishPacket {
-    pub total_chunks: u32,
-    pub file_hash: u64,
-}
+// ---------------------------------------------------------------------
+// UDP datagram tags
+// ---------------------------------------------------------------------
 
-#[derive(Serialize, Deserialize, Debug)]
-pub struct MissingPacket {
-    pub missing_chunks: Vec<u32>,
-}
+pub const TAG_DATA: u8 = 0x01;
+pub const TAG_BLOCK_END: u8 = 0x02;
 
-// ---------------- Continuous control channel (receiver -> sender) ----------------
-//
-// Sent repeatedly over TCP for the lifetime of a transfer instead of once at
-// the very end.
-//
-// `Ack` is a progress report bounded to the receiver's current lookahead
-// window:
-//   - `highest_contiguous`: everything below this is fully delivered.
-//   - `acked`: ids *above* that floor the receiver already has (selective
-//     ack). Needed because a later chunk can land fine while an earlier one
-//     is still missing - without reporting these explicitly, the sender has
-//     no way to know it can stop tracking them, since the cumulative floor
-//     alone never reaches them.
-//   - `missing`: ids in the window the receiver is still waiting on.
-//
-// `Done` closes the loop once every chunk has arrived.
+// ---------------------------------------------------------------------
+// TCP control message tags
+// ---------------------------------------------------------------------
 
-const ACK_TAG: u8 = 0x01;
-const DONE_TAG: u8 = 0x02;
+pub const CTRL_BLOCK_ACK: u8 = 0xB1;
+pub const CTRL_BLOCK_COMPLETE: u8 = 0xB2;
 
-pub enum ControlMessage {
-    Ack {
-        highest_contiguous: u32,
-        acked: Vec<u32>,
-        missing: Vec<u32>,
-    },
-    Done,
-}
+/// One packet of block-framed, encrypted file data.
+///
+/// Wire format (after the caller has read/stripped the leading TAG_DATA byte):
+/// `[block_id:4][packet_in_block:2][encrypted_size:4][hash:8][payload:N]`
+///
+/// `block_id` + `packet_in_block` replace the old flat `chunk_id`, but the
+/// global chunk id used for the AES-CTR counter is always recoverable as
+/// `block_id * PACKETS_PER_BLOCK + packet_in_block`, so encryption is
+/// unaffected by this framing change.
+pub struct DataPacket;
 
-pub fn encode_ack(highest_contiguous: u32, acked: &[u32], missing: &[u32]) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(1 + 4 + 4 + acked.len() * 4 + 4 + missing.len() * 4);
-    buf.push(ACK_TAG);
-    buf.extend_from_slice(&highest_contiguous.to_be_bytes());
+impl DataPacket {
+    /// Length of the header *including* the leading tag byte.
+    pub const HEADER_LEN: usize = 1 + 4 + 2 + 4 + 8;
 
-    buf.extend_from_slice(&(acked.len() as u32).to_be_bytes());
-    for id in acked {
-        buf.extend_from_slice(&id.to_be_bytes());
+    /// Encodes a full, ready-to-send UDP datagram (tag byte included).
+    pub fn encode(block_id: u32, packet_in_block: u16, hash: u64, payload: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(Self::HEADER_LEN + payload.len());
+        out.push(TAG_DATA);
+        out.extend_from_slice(&block_id.to_be_bytes());
+        out.extend_from_slice(&packet_in_block.to_be_bytes());
+        out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        out.extend_from_slice(&hash.to_be_bytes());
+        out.extend_from_slice(payload);
+        out
     }
 
-    buf.extend_from_slice(&(missing.len() as u32).to_be_bytes());
-    for id in missing {
-        buf.extend_from_slice(&id.to_be_bytes());
-    }
-
-    buf
-}
-
-pub fn encode_done() -> Vec<u8> {
-    vec![DONE_TAG]
-}
-
-/// Blocking read of exactly one control message from a TCP stream.
-pub fn read_control_message(stream: &mut impl Read) -> Result<ControlMessage> {
-    let mut tag = [0u8; 1];
-    stream.read_exact(&mut tag)?;
-
-    match tag[0] {
-        ACK_TAG => {
-            let mut hc_buf = [0u8; 4];
-            stream.read_exact(&mut hc_buf)?;
-            let highest_contiguous = u32::from_be_bytes(hc_buf);
-
-            let acked = read_id_list(stream)?;
-            let missing = read_id_list(stream)?;
-
-            Ok(ControlMessage::Ack {
-                highest_contiguous,
-                acked,
-                missing,
-            })
+    /// Decodes a datagram body (tag byte already stripped by the caller).
+    /// Returns `None` on any malformed/truncated input rather than erroring,
+    /// since a corrupt or torn UDP datagram should simply be dropped -- it
+    /// will show up as "missing" and get repaired like any lost packet.
+    pub fn decode(body: &[u8]) -> Option<DecodedDataPacket> {
+        const FIXED: usize = 4 + 2 + 4 + 8; // header minus the tag byte
+        if body.len() < FIXED {
+            return None;
         }
-        DONE_TAG => Ok(ControlMessage::Done),
-        other => bail!("unknown control message tag: {other}"),
+
+        let block_id = u32::from_be_bytes(body[0..4].try_into().ok()?);
+        let packet_in_block = u16::from_be_bytes(body[4..6].try_into().ok()?);
+        let encrypted_size = u32::from_be_bytes(body[6..10].try_into().ok()?) as usize;
+        let hash = u64::from_be_bytes(body[10..18].try_into().ok()?);
+
+        if body.len() < FIXED + encrypted_size {
+            return None;
+        }
+
+        Some(DecodedDataPacket {
+            block_id,
+            packet_in_block,
+            hash,
+            payload: body[FIXED..FIXED + encrypted_size].to_vec(),
+        })
     }
 }
 
-fn read_id_list(stream: &mut impl Read) -> Result<Vec<u32>> {
-    let mut count_buf = [0u8; 4];
-    stream.read_exact(&mut count_buf)?;
-    let count = u32::from_be_bytes(count_buf) as usize;
+pub struct DecodedDataPacket {
+    pub block_id: u32,
+    pub packet_in_block: u16,
+    pub hash: u64,
+    pub payload: Vec<u8>,
+}
 
-    let mut id_bytes = vec![0u8; count * 4];
-    stream.read_exact(&mut id_bytes)?;
+/// Sent over UDP right after the final packet of a block has gone out.
+/// Tells the receiver "the sender believes this block's initial
+/// transmission is done -- check what you're missing". It is *not* relied
+/// on for correctness: the receiver also runs its own idle timer per block
+/// so a lost BlockEnd doesn't stall anything (see receiver transport,
+/// Phase 3).
+///
+/// Wire format (after tag byte): `[block_id:4][total_packets:4]`
+pub struct BlockEndPacket;
 
-    Ok(id_bytes
-        .chunks_exact(4)
-        .map(|c| u32::from_be_bytes(c.try_into().unwrap()))
-        .collect())
+impl BlockEndPacket {
+    pub const LEN: usize = 1 + 4 + 4;
+
+    pub fn encode(block_id: u32, total_packets: u32) -> Vec<u8> {
+        let mut out = Vec::with_capacity(Self::LEN);
+        out.push(TAG_BLOCK_END);
+        out.extend_from_slice(&block_id.to_be_bytes());
+        out.extend_from_slice(&total_packets.to_be_bytes());
+        out
+    }
+
+    pub fn decode(body: &[u8]) -> Option<(u32, u32)> {
+        if body.len() < 8 {
+            return None;
+        }
+        let block_id = u32::from_be_bytes(body[0..4].try_into().ok()?);
+        let total_packets = u32::from_be_bytes(body[4..8].try_into().ok()?);
+        Some((block_id, total_packets))
+    }
+}
+
+/// TCP control message, receiver -> sender, scoped to a single block.
+///
+/// This intentionally carries *only* per-block information (never a
+/// whole-file bitmap) so a repair round trip costs a tiny, fixed amount of
+/// data no matter how large the file is.
+pub enum BlockAck {
+    /// Some packets in this block never arrived (or failed their checksum).
+    /// `missing` holds their `packet_in_block` ids -- at most
+    /// `PACKETS_PER_BLOCK` of them, so this fits comfortably in one TCP
+    /// write even for a maximally lossy block.
+    Missing { block_id: u32, missing: Vec<u16> },
+    /// Every packet in this block has been received and verified.
+    Complete { block_id: u32 },
+}
+
+impl BlockAck {
+    pub fn write_to<W: Write>(&self, stream: &mut W) -> io::Result<()> {
+        match self {
+            BlockAck::Complete { block_id } => {
+                stream.write_all(&[CTRL_BLOCK_COMPLETE])?;
+                stream.write_all(&block_id.to_be_bytes())?;
+            }
+            BlockAck::Missing { block_id, missing } => {
+                stream.write_all(&[CTRL_BLOCK_ACK])?;
+                stream.write_all(&block_id.to_be_bytes())?;
+                stream.write_all(&(missing.len() as u32).to_be_bytes())?;
+                for id in missing {
+                    stream.write_all(&id.to_be_bytes())?;
+                }
+            }
+        }
+        stream.flush()
+    }
+
+    pub fn read_from<R: Read>(stream: &mut R) -> io::Result<BlockAck> {
+        let mut tag = [0u8; 1];
+        stream.read_exact(&mut tag)?;
+
+        let mut block_id_buf = [0u8; 4];
+        stream.read_exact(&mut block_id_buf)?;
+        let block_id = u32::from_be_bytes(block_id_buf);
+
+        match tag[0] {
+            CTRL_BLOCK_COMPLETE => Ok(BlockAck::Complete { block_id }),
+            CTRL_BLOCK_ACK => {
+                let mut count_buf = [0u8; 4];
+                stream.read_exact(&mut count_buf)?;
+                let count = u32::from_be_bytes(count_buf) as usize;
+
+                let mut missing = Vec::with_capacity(count);
+                let mut id_buf = [0u8; 2];
+                for _ in 0..count {
+                    stream.read_exact(&mut id_buf)?;
+                    missing.push(u16::from_be_bytes(id_buf));
+                }
+
+                Ok(BlockAck::Missing { block_id, missing })
+            }
+            other => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unknown control tag {other:#x}"),
+            )),
+        }
+    }
 }

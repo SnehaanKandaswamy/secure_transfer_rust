@@ -25,56 +25,47 @@ pub const RETRANSMIT_TIMEOUT_MS: u64 = 10;
 pub const WINDOW_SIZE: usize = 256;
 pub const RETRANSMIT_BATCH_SIZE: usize = 4096;
 
-// ---------------- Adaptive sliding-window transport ----------------
-//
-// These replace the old "blast everything, then repair once" design.
-// The sender keeps at most `cwnd` packets unacknowledged at any time and
-// grows/shrinks that window based on what the receiver reports, instead
-// of relying on a network-specific pacing sleep. This is deliberately
-// conservative to start on unknown networks (office Wi-Fi, VPNs, etc.)
-// and ramps up automatically on clean links.
-
-// Starting window size (packets in flight), before any feedback arrives.
-pub const INITIAL_WINDOW: usize = 256;
-
-// Window never shrinks below this, so we always make forward progress
-// even on very lossy links.
-pub const MIN_WINDOW: usize = 128;
-
-// Window never grows past this - just a safety ceiling.
-pub const MAX_WINDOW: usize = 4096;
-
-// How much the window grows after each clean (loss-free) ACK round.
-pub const WINDOW_GROWTH_STEP: usize = 128;
-
-// How often the receiver reports progress back to the sender.
-pub const ACK_INTERVAL_MS: u64 = 10;
-
-// If we haven't heard *anything* about a packet (ack or "missing") after
-// this long, assume the ACK carrying that news was itself lost and just
-// resend the packet proactively.
-pub const RTO_MS: u64 = 60;
-
-// Minimum time that must pass before the same chunk id can be resent
-// again in response to the receiver reporting it "missing". The receiver
-// reports its missing list on every ACK_INTERVAL_MS tick (15ms) - without
-// this gate, a chunk that's still missing gets resent on every single
-// tick, turning a handful of stuck chunks into a multi-thousand-packet-
-// per-second retransmission storm that never lets up.
-pub const MIN_RESEND_INTERVAL_MS: u64 = 40;
-
-// How far past the receiver's cumulative "highest contiguous" point it
-// scans for gaps to report each round. Keeps ACK packets small and
-// focused on the currently-active window instead of listing every
-// not-yet-sent chunk in a multi-GB file. Kept close to the sender's
-// actual window size (a few hundred packets) - a much larger value here
-// was reporting thousands of ids that simply hadn't been sent yet as
-// "missing", bloating every ACK to tens of KB and risking a blocked TCP
-// write if the sender's ACK reader ever fell slightly behind.
-pub const MISSING_LOOKAHEAD: u32 = 512;
-
 // Number of independent UDP sockets/threads used to transmit the
 // initial burst in parallel. Each pulls encrypted chunks off the same
 // queue and sends on its own socket. Try 2-4; more isn't necessarily
 // better if the link itself is the bottleneck rather than the sender.
 pub const NUM_SENDER_STREAMS: usize = 1;
+
+// ---------------------------------------------------------------------
+// Block-pipelined transport (see transport.rs)
+// ---------------------------------------------------------------------
+
+// Packets per block. Chosen so a block is small enough to repair cheaply
+// (a lossy block costs at most PACKETS_PER_BLOCK ids in one TCP message)
+// but large enough to amortize the per-block BlockEnd/BlockAck round trip
+// over plenty of data. 256 packets * ~1400 bytes ~= 350 KB per block.
+pub const PACKETS_PER_BLOCK: usize = 256;
+
+// Maximum number of blocks the sender keeps "open" (packets sent, not yet
+// confirmed complete) at once. This is the only flow-control knob in the
+// transport: it bounds memory to a small constant regardless of file size,
+// while still letting the receiver repair one block while later blocks
+// keep arriving. 3-4 is the sweet spot the design calls for -- enough to
+// keep the network saturated across the RTTs seen on Wi-Fi, without
+// unbounded cache growth if repairs lag behind.
+pub const PIPELINE_DEPTH: usize = 4;
+
+// After a BlockEnd (or, on the receiver side, after a quiet period with no
+// new packets for the active block), wait this long before checking for
+// gaps -- gives packets already in flight a chance to land so we don't
+// request retransmission of something that was just about to arrive.
+// This is a short, fixed grace period rather than a pacing delay: it never
+// throttles the send rate, it only delays the receiver's *decision* to ask
+// for a repair.
+pub const BLOCK_GRACE_PERIOD_MS: u64 = 8;
+
+// If no packets at all arrive for the currently-active block for this long,
+// the receiver proactively checks it rather than waiting indefinitely for a
+// BlockEnd that may have been lost. This is what prevents a lost BlockEnd
+// from ever stalling the transfer.
+pub const BLOCK_IDLE_TIMEOUT_MS: u64 = 150;
+
+// Safety valve: if a single block still isn't complete after this many
+// repair rounds, give up on it (log and move on) rather than retrying
+// forever on a truly broken link.
+pub const MAX_BLOCK_RETRY_ROUNDS: u32 = 50;

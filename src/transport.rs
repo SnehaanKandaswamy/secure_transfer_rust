@@ -1,184 +1,133 @@
-//! Sliding-window transport state with AIMD-style congestion control.
+//! Block-pipelined reliable UDP transport.
 //!
-//! This replaces the old "blast everything, then repair once at the end"
-//! model. The sender keeps a bounded number of unacknowledged packets in
-//! flight (`cwnd`) instead of firing the whole file as fast as the socket
-//! will accept it. The receiver reports progress continuously - a
-//! cumulative "highest contiguous" marker, plus which ids above that floor
-//! it already has (selective ack) and which it's still missing - and the
-//! sender reacts immediately:
+//! Replaces the old packet-level sliding-window skeleton (which was never
+//! actually enforced -- `can_send()` always returned `true`) with something
+//! that operates purely at the *block* granularity, per the design:
 //!
-//!   * No losses reported  -> grow the window (we can push harder)
-//!   * Losses reported     -> shrink the window and resend just those IDs
-//!   * An ACK never shows  -> resend anyway once the packet times out
+//! - The file is split into fixed-size blocks of `PACKETS_PER_BLOCK` packets.
+//! - At most `PIPELINE_DEPTH` blocks are "open" (packets sent, not yet
+//!   confirmed complete) at any time. This is the only form of flow control
+//!   in the whole transport -- no cwnd, no per-packet timers, no inflight
+//!   packet maps.
+//! - Retransmission is scoped to individual packets within one block, never
+//!   a whole block or the whole file.
 //!
-//! This is the same shape as TCP's congestion control (and what QUIC/UDT/
-//! KCP/ENet do over UDP), which is what lets it settle at whatever rate a
-//! given network can sustain instead of needing per-network tuning.
+//! Memory bound: with `PIPELINE_DEPTH` blocks of `PACKETS_PER_BLOCK` packets
+//! each cached at a time, worst-case cache size is
+//! `PIPELINE_DEPTH * PACKETS_PER_BLOCK` packets -- a small, constant number
+//! regardless of file size (e.g. 4 * 256 = 1024 packets, ~1.4 MB at
+//! CHUNK_SIZE=1400).
 
-use std::{
-    collections::{BTreeMap, VecDeque},
-    time::{Duration, Instant},
-};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
-use crate::config::{INITIAL_WINDOW, MAX_WINDOW, MIN_RESEND_INTERVAL_MS, MIN_WINDOW, RTO_MS, WINDOW_GROWTH_STEP};
+use crate::config::PACKETS_PER_BLOCK;
 
-pub struct InFlightPacket {
-    pub sent_at: Instant,
+/// Per-block cache of packets the sender has transmitted, kept only long
+/// enough to serve retransmission requests. Freed as soon as the block is
+/// confirmed complete by the receiver.
+pub struct BlockCacheEntry {
+    /// Encoded, ready-to-resend UDP datagrams, indexed by packet_in_block.
+    packets: Vec<Option<Vec<u8>>>,
 }
 
-pub struct TransportState {
-    /// Congestion window: the max number of packets allowed in flight
-    /// (sent, not yet acknowledged one way or another) at any given moment.
-    pub cwnd: usize,
-
-    /// Lowest chunk id the receiver has confirmed contiguously up to.
-    pub send_base: u32,
-
-    /// Next fresh sequence number handed out by `mark_sent`.
-    pub next_seq: u32,
-
-    /// Packets sent but not yet acknowledged (cumulatively or selectively),
-    /// keyed by chunk id.
-    pub inflight: BTreeMap<u32, InFlightPacket>,
-
-    /// Packets waiting for window space before their first transmission.
-    pub pending: VecDeque<(u32, Vec<u8>, usize)>,
+impl BlockCacheEntry {
+    fn new(total: usize) -> Self {
+        Self {
+            packets: vec![None; total],
+        }
+    }
 }
 
-impl TransportState {
+/// Shared between the block-sender loop (producer, one insert per packet
+/// sent) and the control-ack listener thread (consumer: one lookup per
+/// retransmit request, one removal per completed block).
+///
+/// A plain `Mutex` is sufficient: none of these operations sit on a
+/// per-packet hot path once the network itself is the bottleneck, and
+/// contention between "insert newly sent packet" and "look up packets to
+/// retransmit" is inherently rare (retransmits only happen for a handful of
+/// packets per block, not the steady stream of new sends).
+#[derive(Clone)]
+pub struct SharedBlockCache {
+    inner: Arc<Mutex<HashMap<u32, BlockCacheEntry>>>,
+}
+
+impl SharedBlockCache {
     pub fn new() -> Self {
         Self {
-            cwnd: INITIAL_WINDOW,
-            send_base: 0,
-            next_seq: 0,
-            inflight: BTreeMap::new(),
-            pending: VecDeque::new(),
+            inner: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    pub fn queue_packet(&mut self, chunk_id: u32, packet: Vec<u8>, bytes: usize) {
-        self.pending.push_back((chunk_id, packet, bytes));
+    /// Records a freshly sent packet, creating the block's cache entry on
+    /// first use. `total` is the number of packets in this block (handles
+    /// the final, possibly-shorter block of the file).
+    pub fn record_sent(&self, block_id: u32, packet_in_block: u16, total: usize, datagram: Vec<u8>) {
+        let mut guard = self.inner.lock().unwrap();
+        let entry = guard
+            .entry(block_id)
+            .or_insert_with(|| BlockCacheEntry::new(total));
+        entry.packets[packet_in_block as usize] = Some(datagram);
     }
 
-    pub fn next_pending(&mut self) -> Option<(u32, Vec<u8>, usize)> {
-        self.pending.pop_front()
-    }
-
-    /// True while there's still room in the window for another fresh send.
-    /// This is the actual flow-control gate: on a fast clean link `cwnd`
-    /// climbs and this stays true almost always; on a congested link it
-    /// stays false until acks free up room, which is what makes the sender
-    /// naturally back off instead of overflowing queues downstream.
-    pub fn can_send(&self) -> bool {
-        self.inflight.len() < self.cwnd
-    }
-
-    pub fn mark_sent(&mut self, chunk_id: u32) {
-        self.inflight.insert(chunk_id, InFlightPacket { sent_at: Instant::now() });
-        self.next_seq = self.next_seq.max(chunk_id + 1);
-    }
-
-    /// Reset the in-flight timer for a chunk we just resent. Without this,
-    /// a chunk reported `missing` by an ACK (and resent in that branch)
-    /// keeps its original `sent_at`, so `timed_out()` can immediately
-    /// consider it expired again and resend it a second time on the very
-    /// next loop iteration, even though we just sent it moments ago.
-    pub fn mark_retransmitted(&mut self, chunk_id: u32) {
-        if let Some(p) = self.inflight.get_mut(&chunk_id) {
-            p.sent_at = Instant::now();
-        }
-    }
-
-    /// Apply one progress report from the receiver:
-    ///   - everything below `highest_contiguous` is fully delivered
-    ///   - `acked` lists ids *above* that floor the receiver already has
-    ///     (selective ack) - a later chunk can arrive fine even while an
-    ///     earlier one is still missing, and without this list those later
-    ///     chunks could never be evicted from `inflight` just because the
-    ///     cumulative floor hasn't caught up to them yet
-    ///   - `missing` lists ids the receiver is still waiting on
-    ///
-    /// Returns the chunk ids to retransmit right now (empty if the round
-    /// was clean, in which case the window also grows).
-    pub fn on_ack(&mut self, highest_contiguous: u32, acked: &[u32], missing: &[u32]) -> Vec<u32> {
-        self.send_base = self.send_base.max(highest_contiguous);
-
-        // Cumulative floor: anything below it is done, whether or not we
-        // still happen to have a stale inflight entry for it.
-        self.inflight.retain(|&id, _| id >= highest_contiguous);
-
-        // Selective ack: evict specific later ids the receiver confirms it
-        // has, even though the contiguous floor hasn't reached them yet.
-        // This is the fix for the freeze - previously only the cumulative
-        // floor could evict anything, so one stuck low chunk id pinned
-        // every chunk sent after it in `inflight` forever, `can_send()`
-        // never went true again, and the window stuck at MIN_WINDOW with
-        // nothing moving.
-        for &id in acked {
-            self.inflight.remove(&id);
-        }
-
-        if missing.is_empty() {
-            self.grow();
-        } else {
-            self.shrink();
-        }
-
-        // Gate: only actually resend an id if it hasn't been (re)sent very
-        // recently. Without this, every 15ms ACK reporting the same still-
-        // missing id triggers another immediate resend, so a handful of
-        // genuinely stuck chunks turn into a nonstop flood instead of a
-        // handful of retries per second.
-        let now = Instant::now();
-        let min_gap = Duration::from_millis(MIN_RESEND_INTERVAL_MS);
-        missing
-            .iter()
-            .copied()
-            .filter(|id| {
-                self.inflight
-                    .get(id)
-                    .map(|p| now.duration_since(p.sent_at) > min_gap)
-                    .unwrap_or(true)
-            })
+    /// Returns the cached datagrams for the requested packet ids, silently
+    /// skipping any that aren't cached (defensive only -- under correct
+    /// operation every requested id should have been sent and cached).
+    pub fn fetch_for_retransmit(&self, block_id: u32, ids: &[u16]) -> Vec<Vec<u8>> {
+        let guard = self.inner.lock().unwrap();
+        let Some(entry) = guard.get(&block_id) else {
+            return Vec::new();
+        };
+        ids.iter()
+            .filter_map(|&id| entry.packets.get(id as usize).and_then(|p| p.clone()))
             .collect()
     }
 
-    /// Packets that have been in flight longer than the retransmit timeout
-    /// without being acknowledged (cumulatively or selectively) or reported
-    /// missing yet. Covers the case where the ACK itself got dropped, or a
-    /// chunk was sent further ahead than the receiver's current report
-    /// window covers.
-    pub fn timed_out(&mut self) -> Vec<u32> {
-        let now = Instant::now();
-        let rto = Duration::from_millis(RTO_MS);
-
-        let expired: Vec<u32> = self
-            .inflight
-            .iter()
-            .filter(|(_, p)| now.duration_since(p.sent_at) > rto)
-            .map(|(&id, _)| id)
-            .collect();
-
-        if expired.is_empty() {
-            return expired;
-        }
-
-        for id in &expired {
-            if let Some(p) = self.inflight.get_mut(id) {
-                p.sent_at = now;
-            }
-        }
-
-        self.shrink();
-        expired
+    /// Frees a block's cache once the receiver has confirmed it complete.
+    pub fn complete(&self, block_id: u32) {
+        self.inner.lock().unwrap().remove(&block_id);
     }
 
-    fn grow(&mut self) {
-        self.cwnd = (self.cwnd + WINDOW_GROWTH_STEP).min(MAX_WINDOW);
+    /// Number of blocks currently cached (sent but not yet confirmed
+    /// complete). Exposed for logging/diagnostics; the pipeline depth is
+    /// actually enforced via a semaphore-style permit channel (see
+    /// sender.rs), not by polling this count.
+    pub fn open_block_count(&self) -> usize {
+        self.inner.lock().unwrap().len()
     }
+}
 
-    fn shrink(&mut self) {
-        self.cwnd = (self.cwnd / 2).max(MIN_WINDOW);
+impl Default for SharedBlockCache {
+    fn default() -> Self {
+        Self::new()
     }
+}
+
+/// Computes `(block_id, packet_in_block)` for a global chunk id.
+#[inline]
+pub fn block_of(chunk_id: u32) -> (u32, u16) {
+    let per_block = PACKETS_PER_BLOCK as u32;
+    (chunk_id / per_block, (chunk_id % per_block) as u16)
+}
+
+/// Global chunk id for a given `(block_id, packet_in_block)` pair -- the
+/// inverse of `block_of`. This is what gets fed to the (unchanged) AES-CTR
+/// encrypt/decrypt functions, so block framing never touches the crypto.
+#[inline]
+pub fn chunk_id_of(block_id: u32, packet_in_block: u16) -> u32 {
+    block_id * PACKETS_PER_BLOCK as u32 + packet_in_block as u32
+}
+
+/// Number of packets belonging to `block_id`, accounting for the final
+/// block of the file possibly being shorter than `PACKETS_PER_BLOCK`.
+pub fn packets_in_block(block_id: u32, total_chunks: u32) -> usize {
+    let start = block_id as u64 * PACKETS_PER_BLOCK as u64;
+    let remaining = (total_chunks as u64).saturating_sub(start);
+    remaining.min(PACKETS_PER_BLOCK as u64) as usize
+}
+
+/// Total number of blocks a file of `total_chunks` packets splits into.
+pub fn total_blocks(total_chunks: u32) -> u32 {
+    (total_chunks as u64).div_ceil(PACKETS_PER_BLOCK as u64) as u32
 }
