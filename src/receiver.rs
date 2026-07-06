@@ -187,9 +187,7 @@ if hash != packet.hash {
 
     continue;
 }
-        if packets % 100 == 0 {
-    println!("Sending packet {} to channel", chunk_id);
-}
+
         tx.send(
             DecryptedChunk {
                 chunk_id: packet.chunk_id,
