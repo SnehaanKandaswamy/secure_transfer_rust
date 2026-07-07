@@ -584,8 +584,6 @@ impl Sender {
         let mut retransmitted = 0u64;
         let mut completed = 0u32;
         let mut next_print: u64 = 500 * 1024 * 1024;
-        let mut last_status_print = Instant::now();
-        let mut last_missing_print = Instant::now();
         let start = Instant::now();
         // The single source of truth for every block's lifecycle. See the
         // `BlockSlot` doc comment above: an id is `Pending`, `Open`, or
@@ -705,30 +703,18 @@ impl Sender {
                     if let Some(packets) = cached {
                        
                         for packet in &packets {
-    let t = Instant::now();
-
-    if let Err(e) = udp.send(packet) {
-        eprintln!("udp resend failed (non-fatal, will retry): {e}");
-    } else {
-        let waited = t.elapsed();
-
-        if waited > Duration::from_millis(2) {
-            println!("[SEND BLOCKED - RETRANSMIT] {:?}", waited);
-        }
-
-        retransmitted += 1;
-        
-    }
-}
-                        if last_missing_print.elapsed() > Duration::from_secs(1) {
-                            
-                            last_missing_print = Instant::now();
+                            if let Err(e) = udp.send(packet) {
+                            eprintln!("udp resend failed (non-fatal, will retry): {e}");
+                        } else {
+                            retransmitted += 1;
                         }
+                       
                     }
+                }
                 }
                 SenderEvent::Ack(BlockAck::Complete { block_id }) => {
                     // Snapshot what this id currently is (owned data only,
-                    // borrow released immediately) before deciding how to
+                    // borrow released immediately) before deciding how to  
                     // resolve it -- avoids the get/insert borrow conflict
                     // entirely instead of fighting it.
                     enum Prior {
@@ -760,11 +746,7 @@ impl Sender {
                             block_states.insert(block_id, BlockSlot::Resolved);
                             open_slots -= 1;
                             completed += 1;
-                            println!(
-    "[TIMING] Sender completed block {} at {:?}",
-    block_id,
-    start.elapsed()
-);
+                           
                     
                         }
                         Prior::WasPending(n) => {
@@ -780,11 +762,7 @@ impl Sender {
                             );
                             block_states.insert(block_id, BlockSlot::Resolved);
                             completed += 1;
-                                println!(
-    "[TIMING] Sender completed block {} at {:?}",
-    block_id,
-    start.elapsed()
-);
+   
                           
                         }
                         Prior::Unseen => {
@@ -797,39 +775,14 @@ impl Sender {
                             );
                             block_states.insert(block_id, BlockSlot::Resolved);
                             completed += 1;
-                                    println!(
-    "[TIMING] Sender completed block {} at {:?}",
-    block_id,
-    start.elapsed()
-);
+                                  
                             
                         }
                     }
                 }
             }
 
-            if last_status_print.elapsed() > Duration::from_secs(1) {
-                let pending_chunks: usize = block_states
-                    .values()
-                    .map(|slot| match slot {
-                        BlockSlot::Pending(v) => v.len(),
-                        _ => 0,
-                    })
-                    .sum();
-                let pending_blocks = block_states
-                    .values()
-                    .filter(|slot| matches!(slot, BlockSlot::Pending(_)))
-                    .count();
-                println!(
-                    "[DEBUG] sender: packets_sent={} sent={:.2}MB blocks_open={} pending_chunks={} pending_blocks={}",
-                    packets_sent,
-                    bytes_sent as f64 / (1024.0 * 1024.0),
-                    open_slots,
-                    pending_chunks,
-                    pending_blocks
-                );
-                last_status_print = Instant::now();
-            }
+           
         }
 
         println!("==============================");

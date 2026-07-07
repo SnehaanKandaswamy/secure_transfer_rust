@@ -72,7 +72,7 @@ pub const BLOCK_GRACE_PERIOD_MS: u64 = 20;
 // the receiver proactively checks it rather than waiting indefinitely for a
 // BlockEnd that may have been lost. This is what prevents a lost BlockEnd
 // from ever stalling the transfer.
-pub const BLOCK_IDLE_TIMEOUT_MS: u64 = 100;
+pub const BLOCK_IDLE_TIMEOUT_MS: u64 = 50;
 
 // Safety valve: if a single block still isn't complete after this many
 // repair rounds, give up on it (log and move on) rather than retrying
