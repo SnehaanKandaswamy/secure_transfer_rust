@@ -324,13 +324,21 @@ fn ack_manager_loop(
             };
 
             if is_complete {
-                BlockAck::Complete { block_id }.write_to(&mut control)?;
-                state.remove(block_id);
-                completed += 1;
-                println!(
-                    "[DEBUG] block {block_id} confirmed complete ({completed}/{total_blocks_count} done)"
-                );
-            } else if rounds > MAX_BLOCK_RETRY_ROUNDS {
+    println!(
+        "[TIMING] Receiver completed block {} at {:?}",
+        block_id,
+        start.elapsed()
+    );
+
+    BlockAck::Complete { block_id }.write_to(&mut control)?;
+    state.remove(block_id);
+    completed += 1;
+
+    println!(
+        "[DEBUG] block {block_id} confirmed complete ({completed}/{total_blocks_count} done)"
+    );
+}
+            else if rounds > MAX_BLOCK_RETRY_ROUNDS {
                 println!(
                     "WARNING: block {} still incomplete after {} rounds ({} packet(s) missing) -- giving up on it to avoid stalling the transfer.",
                     block_id, rounds, missing.len()
@@ -339,9 +347,10 @@ fn ack_manager_loop(
                 state.remove(block_id);
                 completed += 1;
             } else {
-                println!(
-    "[ACK] Block {} requesting {} missing packets",
+               println!(
+    "[ACK] Block {} | Round {} | Missing {} packets",
     block_id,
+    rounds,
     missing.len()
 );
 

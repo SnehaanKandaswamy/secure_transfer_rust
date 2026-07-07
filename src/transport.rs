@@ -91,25 +91,6 @@ impl SharedBlockCache {
             .collect()
     }
 
-    /// Returns true iff every packet `0..total` for `block_id` is present
-    /// in the cache. This is *not* needed for `fetch_for_retransmit` to be
-    /// correct -- it exists purely so callers (specifically the sender
-    /// loop, right before it emits `BlockEnd`) can assert the "fully
-    /// cached before BlockEnd" invariant at runtime instead of relying
-    /// only on reasoning about thread structure. If this ever returns
-    /// false where it's asserted, that means either the invariant's
-    /// single-sender-thread assumption has been broken (e.g. by wiring up
-    /// `NUM_SENDER_STREAMS` to parallelize the send loop) or a packet was
-    /// silently dropped before reaching `record_sent` -- either way it's a
-    /// real bug that should fail loudly, not be swallowed.
-    pub fn all_cached(&self, block_id: u32, total: usize) -> bool {
-        let guard = self.inner.lock().unwrap();
-        match guard.get(&block_id) {
-            Some(entry) => entry.packets.iter().take(total).all(|p| p.is_some()),
-            None => total == 0,
-        }
-    }
-
     pub fn complete(&self, block_id: u32) {
         self.inner.lock().unwrap().remove(&block_id);
     }
@@ -177,8 +158,7 @@ pub struct BlockRxEntry {
     pub total: usize,
     received: Vec<bool>,
     received_count: usize,
-    last_packet_time: Instant,
-    last_repair_request: Option<Instant>,
+    last_activity: Instant,
     end_seen: bool,
     rounds: u32,
 }
@@ -189,8 +169,7 @@ impl BlockRxEntry {
             total,
             received: vec![false; total],
             received_count: 0,
-            last_packet_time: Instant::now(),
-            last_repair_request: None,
+            last_activity: Instant::now(),
             end_seen: false,
             rounds: 0,
         }
@@ -254,7 +233,7 @@ impl SharedReceiverState {
         let entry = guard
             .entry(block_id)
             .or_insert_with(|| BlockRxEntry::new(total));
-        entry.last_packet_time = Instant::now();
+        entry.last_activity = Instant::now();
     }
 
     /// Called by a decryption worker once a packet has been decrypted and
@@ -285,7 +264,7 @@ impl SharedReceiverState {
             .entry(block_id)
             .or_insert_with(|| BlockRxEntry::new(total));
         entry.end_seen = true;
-        entry.last_packet_time = Instant::now();
+        entry.last_activity = Instant::now();
     }
 
     /// Returns block ids ready to be checked right now: either BlockEnd was
@@ -314,21 +293,13 @@ impl SharedReceiverState {
                     return false;
                 }
 
-                let packet_elapsed = now.duration_since(e.last_packet_time);
+                let elapsed = now.duration_since(e.last_activity);
 
-                let repair_elapsed = match e.last_repair_request {
-                    Some(t) => now.duration_since(t),
-                    None => idle_timeout,
-                };
-                    
                 if e.end_seen {
-                    let required = grace
-                        .saturating_mul(e.rounds + 1)
-                        .min(idle_timeout);
-
-                    packet_elapsed >= required && repair_elapsed >= required
+                    let required = grace.saturating_mul(e.rounds + 1).min(idle_timeout);
+                    elapsed >= required
                 } else {
-                    packet_elapsed >= idle_timeout
+                    elapsed >= idle_timeout
                 }
             })
             .map(|(&id, _)| id)
@@ -341,7 +312,7 @@ impl SharedReceiverState {
         let mut guard = self.inner.lock().unwrap();
         let entry = guard.get_mut(&block_id)?;
         entry.rounds += 1;
-        entry.last_repair_request = Some(Instant::now());
+        entry.last_activity = Instant::now();
         Some((entry.is_complete(), entry.missing_ids(), entry.rounds))
     }
 

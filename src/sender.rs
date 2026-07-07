@@ -623,7 +623,7 @@ impl Sender {
         let mut next_print: u64 = 500 * 1024 * 1024;
         let mut last_status_print = Instant::now();
         let mut last_missing_print = Instant::now();
-
+        let start = Instant::now();
         // The single source of truth for every block's lifecycle. See the
         // `BlockSlot` doc comment above: an id is `Pending`, `Open`, or
         // `Resolved` -- never more than one of those at once, and never
@@ -746,6 +746,11 @@ impl Sender {
 
                     if let Some(packets) = cached {
                         let mut sent_this_round = 0u64;
+                        println!(
+    "[REPAIR] Resending {} packets for block {}",
+    packets.len(),
+    block_id
+);
                         for packet in &packets {
                             if let Err(e) = udp.send(packet) {
                                 eprintln!("udp resend failed (non-fatal, will retry): {e}");
@@ -798,6 +803,11 @@ impl Sender {
                             open_slots -= 1;
                             completed += 1;
                             println!(
+    "[TIMING] Sender completed block {} at {:?}",
+    block_id,
+    start.elapsed()
+);
+                            println!(
                                 "[DEBUG] block {block_id} complete ({completed}/{total_blocks} blocks done)"
                             );
                         }
@@ -814,6 +824,11 @@ impl Sender {
                             );
                             block_states.insert(block_id, BlockSlot::Resolved);
                             completed += 1;
+                                println!(
+    "[TIMING] Sender completed block {} at {:?}",
+    block_id,
+    start.elapsed()
+);
                             println!(
                                 "[DEBUG] block {block_id} complete ({completed}/{total_blocks} blocks done)"
                             );
@@ -828,6 +843,11 @@ impl Sender {
                             );
                             block_states.insert(block_id, BlockSlot::Resolved);
                             completed += 1;
+                                    println!(
+    "[TIMING] Sender completed block {} at {:?}",
+    block_id,
+    start.elapsed()
+);
                             println!(
                                 "[DEBUG] block {block_id} complete ({completed}/{total_blocks} blocks done)"
                             );
