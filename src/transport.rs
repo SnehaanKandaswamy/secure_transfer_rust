@@ -241,21 +241,22 @@ impl SharedReceiverState {
     /// its checksum verified. This is the only thing that can mark a
     /// packet "received" for ack purposes.
     pub fn mark_verified(&self, block_id: u32, packet_in_block: u16, total: usize) {
-        if self.is_completed(block_id) {
-            return;
-        }
-        let mut guard = self.inner.lock().unwrap();
-        let entry = guard
-            .entry(block_id)
-            .or_insert_with(|| BlockRxEntry::new(total));
-        let idx = packet_in_block as usize;
-        if idx < entry.received.len() && !entry.received[idx] {
-            entry.received[idx] = true;
-            entry.received_count += 1;
-   
-}
-        }
+    if self.is_completed(block_id) {
+        return;
     }
+
+    let mut guard = self.inner.lock().unwrap();
+    let entry = guard
+        .entry(block_id)
+        .or_insert_with(|| BlockRxEntry::new(total));
+
+    let idx = packet_in_block as usize;
+
+    if idx < entry.received.len() && !entry.received[idx] {
+        entry.received[idx] = true;
+        entry.received_count += 1;
+    }
+}
 
     /// Records that a BlockEnd datagram arrived for this block.
     pub fn mark_end_seen(&self, block_id: u32, total: usize) {
@@ -342,10 +343,11 @@ impl SharedReceiverState {
     self.inner.lock().unwrap().remove(&block_id);
     self.completed_blocks.lock().unwrap().insert(block_id);
 }
-}
 
+}
 impl Default for SharedReceiverState {
     fn default() -> Self {
         Self::new()
     }
 }
+
