@@ -70,52 +70,80 @@ fn receiver_thread(
     let mut block_ends = 0u64;
     let mut malformed = 0u64;
     let mut last_status_print = Instant::now();
-
+    let mut last_packet = Instant::now();
     while running.load(Ordering::Acquire) {
         let t = Instant::now();
         match udp.recv_from(&mut buffer) {
-            Ok((size, _)) => {
-                recv_time += t.elapsed();
+    Ok((size, _)) => {
+        recv_time += t.elapsed();
 
-                if size < 1 {
-                    continue;
-                }
+        // ADD THIS
+        let gap = last_packet.elapsed();
+        if gap > Duration::from_micros(500) {
+            println!("[RECV GAP] {:?}", gap);
+        }
+        last_packet = Instant::now();
 
-                let tag = buffer[0];
-                let body = &buffer[1..size];
+        if size < 1 {
+            continue;
+        }
 
-                match tag {
-                    TAG_DATA => {
-                        packets += 1;
-                        let Some(pkt) = DataPacket::decode(body) else {
-                            malformed += 1;
-                            continue;
-                        };
+        let tag = buffer[0];
+let body = &buffer[1..size];
 
-                        let total = packets_in_block(pkt.block_id, expected_chunks);
-                        // Timing signal only -- does NOT mark the packet as
-                        // received. See SharedReceiverState's correctness
-                        // note: only a verified decrypt does that.
-                        state.touch_activity(pkt.block_id, total);
+match tag {
+    TAG_DATA => {
+        packets += 1;
 
-                        let chunk_id = chunk_id_of(pkt.block_id, pkt.packet_in_block);
-                        let t = Instant::now();
-                        tx.send(ReceivedPacket {
-                            chunk_id,
-                            block_id: pkt.block_id,
-                            packet_in_block: pkt.packet_in_block,
-                            encrypted: pkt.payload,
-                            hash: pkt.hash,
-                        })?;
-                        let waited = t.elapsed();
+        // START timing the entire receive-path work for this packet
+        let processing_start = Instant::now();
 
-if waited > Duration::from_millis(2) {
-    println!(
-        "[BACKPRESSURE] packet channel blocked {:?}",
-        waited
-    );
+        let decode_start = Instant::now();
+
+let Some(pkt) = DataPacket::decode(body) else {
+    malformed += 1;
+    continue;
+};
+
+let decode_time = decode_start.elapsed();
+
+if decode_time > Duration::from_micros(200) {
+    println!("[SLOW DECODE] {:?}", decode_time);
 }
-                    }
+
+        let total = packets_in_block(pkt.block_id, expected_chunks);
+
+        state.touch_activity(pkt.block_id, total);
+
+        let chunk_id = chunk_id_of(pkt.block_id, pkt.packet_in_block);
+
+        let t = Instant::now();
+        tx.send(ReceivedPacket {
+            chunk_id,
+            block_id: pkt.block_id,
+            packet_in_block: pkt.packet_in_block,
+            encrypted: pkt.payload,
+            hash: pkt.hash,
+        })?;
+        let waited = t.elapsed();
+
+        if waited > Duration::from_millis(2) {
+            println!(
+                "[BACKPRESSURE] packet channel blocked {:?}",
+                waited
+            );
+        }
+
+        // END timing
+        let processing_time = processing_start.elapsed();
+
+        if processing_time > Duration::from_micros(500) {
+            println!(
+                "[SLOW RECEIVE] packet processing took {:?}",
+                processing_time
+            );
+        }
+    }
                     TAG_BLOCK_END => {
                         let Some((block_id, total_packets)) = BlockEndPacket::decode(body) else {
                             malformed += 1;
