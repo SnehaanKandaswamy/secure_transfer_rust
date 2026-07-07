@@ -176,7 +176,7 @@ impl BlockRxEntry {
     }
 
     pub fn is_complete(&self) -> bool {
-        self.received_count >= self.total
+        self.received_count == self.total
     }
 
     pub fn missing_ids(&self) -> Vec<u16> {
@@ -251,6 +251,15 @@ impl SharedReceiverState {
         if idx < entry.received.len() && !entry.received[idx] {
             entry.received[idx] = true;
             entry.received_count += 1;
+            if block_id == 25 {
+    println!(
+        "[VERIFY] block {} received packet {} ({}/{})",
+        block_id,
+        idx,
+        entry.received_count,
+        entry.total
+    );
+}
         }
     }
 
