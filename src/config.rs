@@ -1,6 +1,6 @@
 //BEST
 pub const HOST: &str = "0.0.0.0";
-pub const RECEIVER_IP: &str = "192.168.31.20";
+pub const RECEIVER_IP: &str = "192.168.1.157";
 pub const DATA_PORT: u16 = 5000;
 
 pub const KEY_PORT: u16 = 5001;
@@ -57,15 +57,27 @@ pub const PIPELINE_DEPTH: usize = 4;
 // This is a short, fixed grace period rather than a pacing delay: it never
 // throttles the send rate, it only delays the receiver's *decision* to ask
 // for a repair.
-pub const BLOCK_GRACE_PERIOD_MS: u64 = 8;
+//
+// This was previously 8ms, which was far shorter than a real repair round
+// trip actually takes (TCP report -> sender resends over UDP -> crosses
+// the network -> queues behind other decrypt work -> gets verified). On
+// anything but loopback that round trip is easily tens of milliseconds,
+// so the receiver kept re-requesting the same "missing" packets before a
+// previous retransmit had any chance to land, burning through
+// MAX_BLOCK_RETRY_ROUNDS in well under half a second and force-completing
+// blocks that were still genuinely missing data (silent corruption).
+pub const BLOCK_GRACE_PERIOD_MS: u64 = 150;
 
 // If no packets at all arrive for the currently-active block for this long,
 // the receiver proactively checks it rather than waiting indefinitely for a
 // BlockEnd that may have been lost. This is what prevents a lost BlockEnd
 // from ever stalling the transfer.
-pub const BLOCK_IDLE_TIMEOUT_MS: u64 = 150;
+pub const BLOCK_IDLE_TIMEOUT_MS: u64 = 300;
 
 // Safety valve: if a single block still isn't complete after this many
 // repair rounds, give up on it (log and move on) rather than retrying
-// forever on a truly broken link.
+// forever on a truly broken link. At the grace period above, this now
+// allows roughly 50 * 150ms = 7.5s of real repair attempts per block
+// before giving up, instead of the ~400ms the old 8ms grace period
+// actually allowed.
 pub const MAX_BLOCK_RETRY_ROUNDS: u32 = 50;

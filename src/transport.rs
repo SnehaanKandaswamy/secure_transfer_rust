@@ -229,6 +229,13 @@ impl SharedReceiverState {
     /// seen and the grace period has elapsed since last activity, or the
     /// block has gone idle without ever seeing a BlockEnd (guards against a
     /// lost BlockEnd -- the block still gets checked eventually).
+    ///
+    /// The required wait backs off linearly with how many repair rounds
+    /// have already been tried (capped at `idle_timeout`), instead of using
+    /// a single fixed `grace` value forever. Without backoff, a block that
+    /// genuinely needs more than one round trip to repair gets re-checked
+    /// at the exact same short interval every time, re-requesting packets
+    /// whose previous retransmit hasn't had a chance to land yet.
     pub fn ready_for_check(&self, grace: Duration, idle_timeout: Duration) -> Vec<u32> {
         let guard = self.inner.lock().unwrap();
         let now = Instant::now();
@@ -237,7 +244,12 @@ impl SharedReceiverState {
             .filter(|(_, e)| !e.is_complete())
             .filter(|(_, e)| {
                 let elapsed = now.duration_since(e.last_activity);
-                (e.end_seen && elapsed >= grace) || (!e.end_seen && elapsed >= idle_timeout)
+                if e.end_seen {
+                    let required = grace.saturating_mul(e.rounds + 1).min(idle_timeout);
+                    elapsed >= required
+                } else {
+                    elapsed >= idle_timeout
+                }
             })
             .map(|(&id, _)| id)
             .collect()
