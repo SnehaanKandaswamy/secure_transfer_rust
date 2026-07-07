@@ -727,15 +727,7 @@ impl Sender {
                     // resolve it -- avoids the get/insert borrow conflict
                     // entirely instead of fighting it.
                     println!("[SENDER] Completed block {}", block_id);
-                    println!(
-    "[STATE] block={} prior={:?} open_slots={} completed={}/{} states={}",
-    block_id,
-    prior,
-    open_slots,
-    completed,
-    total_blocks,
-    block_states.len(),
-);
+                    
                     #[derive(Debug)]
                     enum Prior {
                         AlreadyResolved,
@@ -799,7 +791,7 @@ impl Sender {
                             
                         }
                     }
-                    println!(
+                               println!(
     "[DEBUG] block={} prior={:?} completed={}/{} open_slots={}",
     block_id,
     prior,
@@ -807,6 +799,7 @@ impl Sender {
     total_blocks,
     open_slots
 );
+     
                 }
             }
 
