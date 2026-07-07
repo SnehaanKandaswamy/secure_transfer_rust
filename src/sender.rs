@@ -732,7 +732,9 @@ impl Sender {
                     // borrow released immediately) before deciding how to  
                     // resolve it -- avoids the get/insert borrow conflict
                     // entirely instead of fighting it.
+                    println!("[ACK RX] Complete received for {}", block_id);
                     println!("[SENDER] Completed block {}", block_id);
+                
                     
                     #[derive(Debug)]
                     enum Prior {
@@ -741,6 +743,12 @@ impl Sender {
                         WasPending(usize),
                         Unseen,
                     }
+                    println!(
+                            "[ACK RX] map size={} open_slots={} completed={}",
+                            block_states.len(),
+                            open_slots,
+                            completed
+                        );
                     let prior = match block_states.get(&block_id) {
                         Some(BlockSlot::Resolved) => Prior::AlreadyResolved,
                         Some(BlockSlot::Open(_)) => Prior::WasOpen,
@@ -756,14 +764,22 @@ impl Sender {
                             // bump `completed` again, or the loop could
                             // exit having never actually resolved every
                             // block.
+                                println!("[ACK RX] {} already resolved", block_id);
                             println!(
                                 "[WARN] duplicate Complete ack for already-resolved block {block_id} -- ignoring"
                             );
                         }
                         Prior::WasOpen => {
+                                println!("[ACK RX] {} was open -> resolving", block_id);
                             block_states.insert(block_id, BlockSlot::Resolved);
                             open_slots -= 1;
                             completed += 1;
+                             println!(
+                                    "[ACK RX] completed={}/{} open_slots={}",
+                                    completed,
+                                    total_blocks,
+                                    open_slots
+                                );
                            
                     
                         }
@@ -773,6 +789,7 @@ impl Sender {
                             // sender ever got a pipeline slot to open it.
                             // Whatever's buffered for it is now moot --
                             // discard it. Never admitted, never reopened.
+                             println!("[ACK RX] {} was pending ({})", block_id, n);
                             println!(
                                 "[WARN] Complete ack for block {block_id} while {n} chunk(s) were \
                                  still buffered (never opened) -- discarding and marking resolved \
@@ -787,6 +804,7 @@ impl Sender {
                             // Force-completed before the sender ever saw a
                             // single chunk for it. Mark resolved
                             // preemptively so nothing can ever open it.
+                            println!("[ACK RX] {} unseen", block_id);
                             println!(
                                 "[WARN] Complete ack for block {block_id} that the sender never saw \
                                  a single chunk for -- marking resolved preemptively"
