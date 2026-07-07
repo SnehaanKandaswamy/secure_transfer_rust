@@ -147,6 +147,230 @@ impl BlockState {
     }
 }
 
+// ---------------------------------------------------------------------
+// Scheduler fix #2: see PROGRESS LOG entry at the top of this file.
+//
+// The previous fix (separate `blocks: HashMap<u32, BlockState>`,
+// `pending: HashMap<u32, Vec<EncryptedChunk>>`, and
+// `resolved: HashSet<u32>`) closed the reopening bug in practice, but left
+// a block's state spread across up to three different collections with
+// nothing at the type level stopping a given id from ending up in more
+// than one of them at once, and left `block_manager_loop` only draining
+// `pending` reactively (inside the `Complete` arm) rather than before
+// every wait on `events.recv()`.
+//
+// `BlockSlot` collapses all of that into one enum, and `block_states:
+// HashMap<u32, BlockSlot>` is now the *only* place block lifecycle lives.
+// A given block id has exactly one entry with exactly one variant at any
+// time -- "existing in two scheduler states at once" is no longer
+// something the code has to avoid by convention, it's something the type
+// system doesn't allow. Entries are never removed once resolved (only
+// bounded by `total_blocks`, which is known and finite), which is what
+// makes "cannot be reopened or buffered twice" permanent rather than
+// contingent on remembering to consult a side-set.
+// ---------------------------------------------------------------------
+enum BlockSlot {
+    /// Chunks have arrived for this block, but the pipeline had no room
+    /// to open it at the time. Never coexists with an `Open` or
+    /// `Resolved` entry for the same id -- it's a different variant of
+    /// the same map slot, not a separate collection.
+    Pending(Vec<EncryptedChunk>),
+    /// Actively open: accepting chunks, cache serving retransmits.
+    Open(BlockState),
+    /// Permanently resolved -- confirmed complete, or force-completed by
+    /// the receiver after `MAX_BLOCK_RETRY_ROUNDS`. Terminal: nothing
+    /// ever transitions a `Resolved` entry back to `Pending` or `Open`.
+    /// This is what makes reopening structurally impossible -- there is
+    /// no code path that ever calls `.entry(id).or_insert_with(..)` on an
+    /// id without first checking whether it's already `Resolved`.
+    Resolved,
+}
+
+/// Admits a chunk into an already-`Open` block. Caller guarantees
+/// `block_states[block_id]` is `BlockSlot::Open(..)`.
+fn place_chunk(
+    block_id: u32,
+    packet_in_block: u16,
+    chunk: EncryptedChunk,
+    block_states: &mut HashMap<u32, BlockSlot>,
+    udp: &UdpSocket,
+    bytes_sent: &mut u64,
+    packets_sent: &mut u64,
+    next_print: &mut u64,
+) {
+    let Some(BlockSlot::Open(entry)) = block_states.get_mut(&block_id) else {
+        unreachable!(
+            "place_chunk called for block {block_id}, packet {packet_in_block}, \
+             but that block is not in the Open state"
+        );
+    };
+
+    // Cache-before-send ordering, unchanged from the earlier fix.
+    entry.packets[packet_in_block as usize] = Some(chunk.packet.clone());
+    if let Err(e) = udp.send(&chunk.packet) {
+        eprintln!("udp send failed (non-fatal, will retry): {e}");
+    }
+
+    *packets_sent += 1;
+    *bytes_sent += chunk.bytes as u64;
+    entry.sent += 1;
+
+    if entry.sent == entry.total && !entry.end_emitted {
+        assert!(
+            entry.all_cached(),
+            "invariant violated: about to emit BlockEnd for block {block_id} \
+             but the cache is missing at least one of its {} packets",
+            entry.total
+        );
+        let end = BlockEndPacket::encode(block_id, entry.total as u32);
+        if let Err(e) = udp.send(&end) {
+            eprintln!("udp send failed (non-fatal, will retry): {e}");
+        }
+        entry.end_emitted = true;
+        println!("[DEBUG] Block {block_id} fully sent, BlockEnd emitted");
+    }
+
+    if *bytes_sent >= *next_print {
+        println!("Sent {:.2} MB", *bytes_sent as f64 / (1024.0 * 1024.0));
+        *next_print += 500 * 1024 * 1024;
+    }
+}
+
+/// Admits one freshly-arrived chunk, or buffers it, depending on the
+/// current state of its block. This -- together with `place_chunk` and
+/// `drain_pending` below -- is the *only* code path that ever writes to
+/// `block_states`, so a block's state transitions are always evaluated
+/// against exactly one map, never two.
+///
+/// Reads the current slot first (a plain, short-lived immutable borrow
+/// that yields owned/`Copy` data -- lengths, unit variants -- and is
+/// fully released before any mutation), then acts on that snapshot. This
+/// sidesteps the classic `match map.get_mut(k) { Some(v) => .., None =>
+/// map.insert(..) }` borrow conflict entirely, rather than fighting it.
+fn admit_or_buffer(
+    chunk: EncryptedChunk,
+    block_states: &mut HashMap<u32, BlockSlot>,
+    open_slots: &mut usize,
+    udp: &UdpSocket,
+    total_chunks: u32,
+    pipeline_depth: usize,
+    bytes_sent: &mut u64,
+    packets_sent: &mut u64,
+    next_print: &mut u64,
+) {
+    let (block_id, packet_in_block) = block_of(chunk.chunk_id);
+
+    enum Action {
+        Drop,
+        PlaceIntoOpen,
+        AppendToPending,
+        OpenAndPlace,
+        BufferNew,
+    }
+
+    let action = match block_states.get(&block_id) {
+        Some(BlockSlot::Resolved) => Action::Drop,
+        Some(BlockSlot::Open(_)) => Action::PlaceIntoOpen,
+        Some(BlockSlot::Pending(_)) => Action::AppendToPending,
+        None if *open_slots < pipeline_depth => Action::OpenAndPlace,
+        None => Action::BufferNew,
+    };
+
+    match action {
+        Action::Drop => {
+            // Stale leftover for a block the receiver has already
+            // disposed of one way or another (real completion or a
+            // force-complete give-up). Dropped here -- never buffered,
+            // never used to reopen -- because its slot is `Resolved`.
+            println!(
+                "[WARN] dropping stale chunk for already-resolved block {block_id} \
+                 (packet {packet_in_block}) -- receiver has already moved past it"
+            );
+        }
+        Action::PlaceIntoOpen => {
+            place_chunk(
+                block_id, packet_in_block, chunk, block_states, udp, bytes_sent, packets_sent, next_print,
+            );
+        }
+        Action::AppendToPending => {
+            // Same block id already has a `Pending` bucket -- append to
+            // the *existing* one. A block id can never end up with two
+            // separate pending buckets, because there is only ever one
+            // map entry per id.
+            if let Some(BlockSlot::Pending(bucket)) = block_states.get_mut(&block_id) {
+                bucket.push(chunk);
+            }
+        }
+        Action::OpenAndPlace => {
+            let total = packets_in_block(block_id, total_chunks);
+            println!("[DEBUG] Block {block_id} opened ({total} packets)");
+            block_states.insert(block_id, BlockSlot::Open(BlockState::new(total)));
+            *open_slots += 1;
+            place_chunk(
+                block_id, packet_in_block, chunk, block_states, udp, bytes_sent, packets_sent, next_print,
+            );
+        }
+        Action::BufferNew => {
+            block_states.insert(block_id, BlockSlot::Pending(vec![chunk]));
+        }
+    }
+}
+
+/// Opens as many `Pending` blocks as the pipeline currently has room for,
+/// in ascending block-id order, admitting every chunk already buffered
+/// for each one it opens. Unlike the old `pop_front`/`push_front`/`break`
+/// loop -- which stopped forever the moment the single item at the front
+/// of one flat FIFO wasn't admittable, silently starving every admittable
+/// chunk queued behind it -- this looks up pending work *by block id*, so
+/// a block that's ready to open is never blocked by some unrelated,
+/// still-not-ready block that happened to arrive first.
+///
+/// Called both reactively (right after a `Complete` ack potentially frees
+/// a slot) and, in `block_manager_loop` below, proactively at the top of
+/// every loop iteration *before* it ever waits on `events.recv()` -- so
+/// admittable pending work is never left sitting untried while the
+/// manager blocks for a new event that isn't needed to make progress.
+fn drain_pending(
+    block_states: &mut HashMap<u32, BlockSlot>,
+    open_slots: &mut usize,
+    pipeline_depth: usize,
+    udp: &UdpSocket,
+    total_chunks: u32,
+    bytes_sent: &mut u64,
+    packets_sent: &mut u64,
+    next_print: &mut u64,
+) {
+    while *open_slots < pipeline_depth {
+        let next_id = block_states
+            .iter()
+            .filter_map(|(&id, slot)| matches!(slot, BlockSlot::Pending(_)).then_some(id))
+            .min();
+
+        let Some(next_id) = next_id else {
+            break;
+        };
+
+        let bucket = match block_states.remove(&next_id) {
+            Some(BlockSlot::Pending(v)) => v,
+            _ => unreachable!("just found block {next_id} as Pending"),
+        };
+
+        let total = packets_in_block(next_id, total_chunks);
+        println!(
+            "[DEBUG] Block {next_id} opened ({total} packets, {} already buffered)",
+            bucket.len()
+        );
+        block_states.insert(next_id, BlockSlot::Open(BlockState::new(total)));
+        *open_slots += 1;
+
+        for buffered in bucket {
+            let (bid, pib) = block_of(buffered.chunk_id);
+            debug_assert_eq!(bid, next_id, "pending bucket contained a chunk for the wrong block");
+            place_chunk(bid, pib, buffered, block_states, udp, bytes_sent, packets_sent, next_print);
+        }
+    }
+}
+
 /// Events funneled into the single-owner block manager thread by the two
 /// dumb relay threads (`Sender::chunk_relay`, `Sender::ack_relay`).
 enum SenderEvent {
@@ -400,102 +624,124 @@ impl Sender {
         let mut last_status_print = Instant::now();
         let mut last_missing_print = Instant::now();
 
-        let mut blocks: HashMap<u32, BlockState> = HashMap::new();
-        let mut pending: std::collections::VecDeque<EncryptedChunk> = std::collections::VecDeque::new();
+        // The single source of truth for every block's lifecycle. See the
+        // `BlockSlot` doc comment above: an id is `Pending`, `Open`, or
+        // `Resolved` -- never more than one of those at once, and never
+        // any of them in a second collection.
+        let mut block_states: HashMap<u32, BlockSlot> = HashMap::new();
+        let mut open_slots: usize = 0;
 
         println!("Block manager thread started");
 
-        let udp_send = |udp: &UdpSocket, packet: &[u8]| {
-            if let Err(e) = udp.send(packet) {
-                eprintln!("udp send failed (non-fatal, will retry): {e}");
-            }
-        };
+        loop {
+            // Drain BEFORE waiting on the channel, not just reactively
+            // after a Complete ack. Nothing other than a freed slot
+            // (tracked by `open_slots`) changes what's admittable, so this
+            // is a cheap no-op whenever there's genuinely nothing to do --
+            // but it guarantees pending work is never left untried while
+            // this thread blocks on `events.recv()` for an event that
+            // isn't actually needed to make progress.
+            drain_pending(
+                &mut block_states,
+                &mut open_slots,
+                pipeline_depth,
+                &udp,
+                total_chunks,
+                &mut bytes_sent,
+                &mut packets_sent,
+                &mut next_print,
+            );
 
-        // Processes one already-dequeued chunk. Returns it back (`Some`)
-        // instead of consuming it if it can't be admitted yet because the
-        // pipeline is at capacity and this chunk would open a new block --
-        // the caller is responsible for buffering it in that case.
-        let mut handle_chunk = |chunk: EncryptedChunk,
-                                 blocks: &mut HashMap<u32, BlockState>,
-                                 bytes_sent: &mut u64,
-                                 packets_sent: &mut u64,
-                                 next_print: &mut u64|
-         -> Option<EncryptedChunk> {
-            let (block_id, packet_in_block) = block_of(chunk.chunk_id);
-            let block_total = packets_in_block(block_id, total_chunks);
-
-            if !blocks.contains_key(&block_id) && blocks.len() >= pipeline_depth {
-                return Some(chunk);
-            }
-
-            let entry = blocks
-                .entry(block_id)
-                .or_insert_with(|| {
-                    println!("[DEBUG] Block {block_id} opened ({block_total} packets)");
-                    BlockState::new(block_total)
-                });
-
-            // Cache-before-send ordering, unchanged from the earlier fix --
-            // still correct, and now the only thread that can ever touch
-            // this entry, so there is no window for anything to remove it
-            // out from under this write either.
-            entry.packets[packet_in_block as usize] = Some(chunk.packet.clone());
-            udp_send(&udp, &chunk.packet);
-
-            *packets_sent += 1;
-            *bytes_sent += chunk.bytes as u64;
-            entry.sent += 1;
-
-            if entry.sent == entry.total && !entry.end_emitted {
-                // This assert can now never fire from a concurrent-mutation
-                // race: this thread is the only writer and only remover of
-                // block state, so `all_cached()` reflects exactly what this
-                // same thread just finished writing.
-                assert!(
-                    entry.all_cached(),
-                    "invariant violated: about to emit BlockEnd for block {block_id} \
-                     but the cache is missing at least one of its {block_total} packets"
-                );
-                let end = BlockEndPacket::encode(block_id, block_total as u32);
-                udp_send(&udp, &end);
-                entry.end_emitted = true;
-                println!("[DEBUG] Block {block_id} fully sent, BlockEnd emitted");
+            if completed >= total_blocks {
+                break;
             }
 
-            if *bytes_sent >= *next_print {
-                println!("Sent {:.2} MB", *bytes_sent as f64 / (1024.0 * 1024.0));
-                *next_print += 500 * 1024 * 1024;
-            }
+            let event = match events.recv() {
+                Ok(event) => event,
+                Err(_) => {
+                    // Both relay threads have exited and the channel is
+                    // empty (crossbeam only reports Disconnected once
+                    // there is nothing left buffered to receive first) --
+                    // no further event will ever arrive. Make one last
+                    // attempt to drain anything admittable (in case the
+                    // very last event processed freed a slot) before
+                    // treating this as terminal, per "channel closure only
+                    // terminates after ... all pending work has been
+                    // processed".
+                    drain_pending(
+                        &mut block_states,
+                        &mut open_slots,
+                        pipeline_depth,
+                        &udp,
+                        total_chunks,
+                        &mut bytes_sent,
+                        &mut packets_sent,
+                        &mut next_print,
+                    );
 
-            None
-        };
+                    if completed >= total_blocks {
+                        break;
+                    }
 
-        while completed < total_blocks {
-            let event = events.recv()?;
+                    let stuck_pending: usize = block_states
+                        .values()
+                        .map(|slot| match slot {
+                            BlockSlot::Pending(v) => v.len(),
+                            _ => 0,
+                        })
+                        .sum();
+                    let stuck_pending_blocks = block_states
+                        .values()
+                        .filter(|slot| matches!(slot, BlockSlot::Pending(_)))
+                        .count();
+
+                    return Err(anyhow::anyhow!(
+                        "event channel closed with {}/{} blocks unresolved: \
+                         {open_slots} block(s) still open awaiting an ack that will \
+                         never arrive, {stuck_pending} chunk(s) buffered across \
+                         {stuck_pending_blocks} block(s) that never got a pipeline \
+                         slot -- the connection was lost before the transfer finished",
+                        total_blocks - completed,
+                        total_blocks,
+                    ));
+                }
+            };
 
             match event {
                 SenderEvent::Chunk(chunk) => {
-                    if let Some(chunk) =
-                        handle_chunk(chunk, &mut blocks, &mut bytes_sent, &mut packets_sent, &mut next_print)
-                    {
-                        // Pipeline is full and this chunk would open a new
-                        // block -- buffer it. It'll be retried the moment a
-                        // block completes below, never by blocking this
-                        // thread (which would also stall draining acks).
-                        pending.push_back(chunk);
-                    }
+                    admit_or_buffer(
+                        chunk,
+                        &mut block_states,
+                        &mut open_slots,
+                        &udp,
+                        total_chunks,
+                        pipeline_depth,
+                        &mut bytes_sent,
+                        &mut packets_sent,
+                        &mut next_print,
+                    );
                 }
                 SenderEvent::Ack(BlockAck::Missing { block_id, missing }) => {
-                    let Some(entry) = blocks.get(&block_id) else {
-                        // No second thread can have removed this out from
-                        // under us -- this means the receiver is asking
-                        // about a block we've already resolved (e.g. a
-                        // stray repeat ack). Safe to ignore.
-                        continue;
+                    // Read-only snapshot of exactly the cached packets we'd
+                    // resend, taken and released before any further access
+                    // to `block_states` (and before any I/O), so there's no
+                    // borrow spanning the actual `udp.send` calls below.
+                    let cached: Option<Vec<Vec<u8>>> = match block_states.get(&block_id) {
+                        Some(BlockSlot::Open(entry)) => Some(
+                            missing
+                                .iter()
+                                .filter_map(|&id| entry.packets.get(id as usize).and_then(|p| p.clone()))
+                                .collect(),
+                        ),
+                        // `Resolved`: stray/late repeat ack, ignore.
+                        // `Pending`: not open yet, nothing cached to resend.
+                        // Missing entirely: unknown to us, ignore.
+                        _ => None,
                     };
-                    let mut sent_this_round = 0u64;
-                    for &id in &missing {
-                        if let Some(Some(packet)) = entry.packets.get(id as usize) {
+
+                    if let Some(packets) = cached {
+                        let mut sent_this_round = 0u64;
+                        for packet in &packets {
                             if let Err(e) = udp.send(packet) {
                                 eprintln!("udp resend failed (non-fatal, will retry): {e}");
                             } else {
@@ -503,47 +749,107 @@ impl Sender {
                                 sent_this_round += 1;
                             }
                         }
-                    }
-                    if last_missing_print.elapsed() > Duration::from_secs(1) {
-                        println!(
-                            "[DEBUG] block {block_id}: {} missing, resent {sent_this_round} packet(s)",
-                            missing.len()
-                        );
-                        last_missing_print = Instant::now();
+                        if last_missing_print.elapsed() > Duration::from_secs(1) {
+                            println!(
+                                "[DEBUG] block {block_id}: {} missing, resent {sent_this_round} packet(s)",
+                                missing.len()
+                            );
+                            last_missing_print = Instant::now();
+                        }
                     }
                 }
                 SenderEvent::Ack(BlockAck::Complete { block_id }) => {
-                    if blocks.remove(&block_id).is_none() {
-                        println!("[WARN] Complete ack for unknown/already-resolved block {block_id}");
+                    // Snapshot what this id currently is (owned data only,
+                    // borrow released immediately) before deciding how to
+                    // resolve it -- avoids the get/insert borrow conflict
+                    // entirely instead of fighting it.
+                    enum Prior {
+                        AlreadyResolved,
+                        WasOpen,
+                        WasPending(usize),
+                        Unseen,
                     }
-                    completed += 1;
-                    println!("[DEBUG] block {block_id} complete ({completed}/{total_blocks} blocks done)");
+                    let prior = match block_states.get(&block_id) {
+                        Some(BlockSlot::Resolved) => Prior::AlreadyResolved,
+                        Some(BlockSlot::Open(_)) => Prior::WasOpen,
+                        Some(BlockSlot::Pending(bucket)) => Prior::WasPending(bucket.len()),
+                        None => Prior::Unseen,
+                    };
 
-                    // A slot just freed up -- try to admit buffered chunks
-                    // now, including ones that open brand new blocks.
-                    while let Some(chunk) = pending.pop_front() {
-                        if let Some(chunk) =
-                            handle_chunk(chunk, &mut blocks, &mut bytes_sent, &mut packets_sent, &mut next_print)
-                        {
-                            // Still can't admit (another slot is still
-                            // full) -- put it back at the front and stop.
-                            // This can't happen right after freeing exactly
-                            // one slot unless pipeline_depth == 0, but stay
-                            // defensive.
-                            pending.push_front(chunk);
-                            break;
+                    match prior {
+                        Prior::AlreadyResolved => {
+                            // Duplicate Complete (e.g. two force-completes,
+                            // or a genuine Complete after an earlier
+                            // force-complete for the same id). Must NOT
+                            // bump `completed` again, or the loop could
+                            // exit having never actually resolved every
+                            // block.
+                            println!(
+                                "[WARN] duplicate Complete ack for already-resolved block {block_id} -- ignoring"
+                            );
+                        }
+                        Prior::WasOpen => {
+                            block_states.insert(block_id, BlockSlot::Resolved);
+                            open_slots -= 1;
+                            completed += 1;
+                            println!(
+                                "[DEBUG] block {block_id} complete ({completed}/{total_blocks} blocks done)"
+                            );
+                        }
+                        Prior::WasPending(n) => {
+                            // The receiver resolved (very likely
+                            // force-completed) this block before the
+                            // sender ever got a pipeline slot to open it.
+                            // Whatever's buffered for it is now moot --
+                            // discard it. Never admitted, never reopened.
+                            println!(
+                                "[WARN] Complete ack for block {block_id} while {n} chunk(s) were \
+                                 still buffered (never opened) -- discarding and marking resolved \
+                                 so it can never be opened later"
+                            );
+                            block_states.insert(block_id, BlockSlot::Resolved);
+                            completed += 1;
+                            println!(
+                                "[DEBUG] block {block_id} complete ({completed}/{total_blocks} blocks done)"
+                            );
+                        }
+                        Prior::Unseen => {
+                            // Force-completed before the sender ever saw a
+                            // single chunk for it. Mark resolved
+                            // preemptively so nothing can ever open it.
+                            println!(
+                                "[WARN] Complete ack for block {block_id} that the sender never saw \
+                                 a single chunk for -- marking resolved preemptively"
+                            );
+                            block_states.insert(block_id, BlockSlot::Resolved);
+                            completed += 1;
+                            println!(
+                                "[DEBUG] block {block_id} complete ({completed}/{total_blocks} blocks done)"
+                            );
                         }
                     }
                 }
             }
 
             if last_status_print.elapsed() > Duration::from_secs(1) {
+                let pending_chunks: usize = block_states
+                    .values()
+                    .map(|slot| match slot {
+                        BlockSlot::Pending(v) => v.len(),
+                        _ => 0,
+                    })
+                    .sum();
+                let pending_blocks = block_states
+                    .values()
+                    .filter(|slot| matches!(slot, BlockSlot::Pending(_)))
+                    .count();
                 println!(
-                    "[DEBUG] sender: packets_sent={} sent={:.2}MB blocks_open={} pending_chunks={}",
+                    "[DEBUG] sender: packets_sent={} sent={:.2}MB blocks_open={} pending_chunks={} pending_blocks={}",
                     packets_sent,
                     bytes_sent as f64 / (1024.0 * 1024.0),
-                    blocks.len(),
-                    pending.len()
+                    open_slots,
+                    pending_chunks,
+                    pending_blocks
                 );
                 last_status_print = Instant::now();
             }
