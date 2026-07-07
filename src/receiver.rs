@@ -68,7 +68,6 @@ fn receiver_thread(
     let mut packets = 0u64;
     let mut block_ends = 0u64;
     let mut malformed = 0u64;
-    let mut seen_blocks: std::collections::HashSet<u32> = std::collections::HashSet::new();
 
     while running.load(Ordering::Acquire) {
         let t = Instant::now();
@@ -92,9 +91,6 @@ fn receiver_thread(
                         };
 
                         let total = packets_in_block(pkt.block_id, expected_chunks);
-                        if seen_blocks.insert(pkt.block_id) {
-                            println!("[DEBUG] First data packet for block {} arrived (block has {} packets)", pkt.block_id, total);
-                        }
                         // Timing signal only -- does NOT mark the packet as
                         // received. See SharedReceiverState's correctness
                         // note: only a verified decrypt does that.
@@ -116,7 +112,6 @@ fn receiver_thread(
                             continue;
                         };
                         block_ends += 1;
-                        println!("[DEBUG] BlockEnd received for block {} (expects {} packets)", block_id, total_packets);
                         state.mark_end_seen(block_id, total_packets as usize);
                     }
                     _ => {
@@ -303,15 +298,12 @@ fn ack_manager_loop(
             continue;
         }
 
-        println!("[DEBUG] Blocks ready for check: {:?}", ready);
-
         for block_id in ready {
             let Some((is_complete, missing, rounds)) = state.snapshot_and_tick(block_id) else {
                 continue;
             };
 
             if is_complete {
-                println!("[DEBUG] Block {} complete -- sending BlockAck::Complete", block_id);
                 BlockAck::Complete { block_id }.write_to(&mut control)?;
                 state.remove(block_id);
                 completed += 1;
@@ -324,7 +316,6 @@ fn ack_manager_loop(
                 state.remove(block_id);
                 completed += 1;
             } else {
-                println!("[DEBUG] Block {} still missing {} packet(s) (round {}) -- sending BlockAck::Missing: {:?}", block_id, missing.len(), rounds, missing);
                 BlockAck::Missing { block_id, missing }.write_to(&mut control)?;
             }
         }
@@ -369,6 +360,7 @@ pub fn run() -> Result<()> {
     println!("Waiting for connection...");
 
     let (mut stream, addr) = listener.accept()?;
+    stream.set_nodelay(true)?;
 
     println!("Connected to {}", addr);
 

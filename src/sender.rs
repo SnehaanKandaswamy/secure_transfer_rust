@@ -47,6 +47,7 @@ impl Sender {
         let tcp = TcpStream::connect(
             format!("{}:{}", RECEIVER_IP, KEY_PORT),
         )?;
+        tcp.set_nodelay(true)?;
 
         let udp = UdpSocket::bind("0.0.0.0:0")?;
         udp.connect(format!("{}:{}", RECEIVER_IP, DATA_PORT))?;
@@ -209,6 +210,18 @@ impl Sender {
 
         println!("Block sender thread started");
 
+        // A single UDP send failure (transient OS/network hiccup) used to
+        // be treated as fatal via `?`, killing the entire transfer over one
+        // bad packet. UDP sends are expected to occasionally fail - that's
+        // the whole reason this protocol has a repair mechanism - so log
+        // and move on instead; a lost initial send just shows up as
+        // "missing" in the next BlockAck like any other dropped packet.
+        let udp_send = |udp: &UdpSocket, packet: &[u8]| {
+            if let Err(e) = udp.send(packet) {
+                eprintln!("udp send failed (non-fatal, will retry): {e}");
+            }
+        };
+
         while let Ok(chunk) = rx.recv() {
             let (block_id, packet_in_block) = block_of(chunk.chunk_id);
             let block_total = packets_in_block(block_id, total_chunks);
@@ -221,10 +234,9 @@ impl Sender {
                 permits_rx.recv()?;
                 opened_blocks.insert(block_id);
                 sent_counts.insert(block_id, 0);
-                println!("[DEBUG] Block {} opened ({} packets)", block_id, block_total);
             }
 
-            udp.send(&chunk.packet)?;
+            udp_send(&udp, &chunk.packet);
             packets_sent += 1;
             bytes_sent += chunk.bytes as u64;
 
@@ -237,8 +249,7 @@ impl Sender {
 
             if *count == block_total {
                 let end = BlockEndPacket::encode(block_id, block_total as u32);
-                udp.send(&end)?;
-                println!("[DEBUG] Block {} fully sent, BlockEnd emitted", block_id);
+                udp_send(&udp, &end);
             }
 
             if bytes_sent >= next_print {
@@ -282,21 +293,20 @@ impl Sender {
         println!("Control-ack loop started, awaiting {} block(s)", total_blocks);
 
         while completed < total_blocks {
-            println!("[DEBUG] Waiting for BlockAck ({}/{} blocks completed so far)...", completed, total_blocks);
             let ack = BlockAck::read_from(&mut control)?;
 
             match ack {
                 BlockAck::Missing { block_id, missing } => {
-                    println!("[DEBUG] BlockAck::Missing for block {} -> {} packet(s) missing: {:?}", block_id, missing.len(), missing);
                     let packets = cache.fetch_for_retransmit(block_id, &missing);
                     for packet in &packets {
-                        udp.send(packet)?;
-                        retransmitted += 1;
+                        if let Err(e) = udp.send(packet) {
+                            eprintln!("udp resend failed (non-fatal, will retry): {e}");
+                        } else {
+                            retransmitted += 1;
+                        }
                     }
-                    println!("[DEBUG] Retransmitted {} packet(s) for block {}", packets.len(), block_id);
                 }
                 BlockAck::Complete { block_id } => {
-                    println!("[DEBUG] BlockAck::Complete for block {} -- releasing cache, moving to next block", block_id);
                     cache.complete(block_id);
                     completed += 1;
                     // Return a slot to the pipeline. If the sender loop has
