@@ -642,6 +642,11 @@ impl Sender {
                         &mut packets_sent,
                         &mut next_print,
                     );
+                    for (id, slot) in &block_states {
+                        if let BlockSlot::Open(_) = slot {
+                            println!("[DEBUG] STILL OPEN BLOCK {}", id);
+                        }
+                    }
 
                     if completed >= total_blocks {
                         break;
