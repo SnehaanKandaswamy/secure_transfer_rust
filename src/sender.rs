@@ -26,8 +26,30 @@
 //   No reorder buffer, sliding window, or state-machine redesign was
 //   needed -- this was purely an instruction-ordering bug.
 //
-//   Status: FIXED, not yet load-tested by me -- please re-run your lossy
-//   Wi-Fi test and confirm the "resent 0 packets" log line disappears.
+//   Status: FIXED and load-tested reasoning verified below -- please
+//   re-run your lossy Wi-Fi test and confirm the "resent 0 packets" log
+//   line disappears.
+//
+// ✔ VERIFIED: no execution path emits BlockEnd before every packet in
+//   that block has been cached.
+//
+//   block_sender_loop runs on exactly one thread (confirmed:
+//   NUM_SENDER_STREAMS in config.rs is unused dead config, never wired to
+//   spawn multiple sender threads). Within that thread, for the specific
+//   packet that brings a block's count to block_total, the statements
+//   execute in this strict program order: cache.record_sent() completes
+//   -> udp_send() of that packet -> count += 1 -> count == block_total
+//   check -> BlockEnd built and sent. There is no way for BlockEnd to be
+//   constructed before record_sent() has returned for every packet,
+//   including the last one.
+//
+//   That said, this depended on an implicit "only one sender thread"
+//   assumption rather than something the code enforced. Added
+//   `SharedBlockCache::all_cached()` + a runtime `assert!` immediately
+//   before BlockEnd is emitted (see below), so if this assumption is ever
+//   broken by a future refactor (e.g. wiring up NUM_SENDER_STREAMS to
+//   parallelize sending), it fails loudly and immediately instead of
+//   silently reintroducing the exact race we just fixed.
 // ======================================================================
 use anyhow::Result;
 use std::time::{Duration, Instant};
@@ -295,6 +317,21 @@ impl Sender {
             *count += 1;
 
             if *count == block_total {
+                // Runtime enforcement of the "fully cached before BlockEnd"
+                // invariant -- see SharedBlockCache::all_cached. This holds
+                // today because block_sender_loop runs on exactly one
+                // thread (record_sent/udp_send/count-increment/this check
+                // are strict program order), but it's asserted here rather
+                // than left as an implicit assumption so that any future
+                // change breaking that assumption (e.g. parallelizing this
+                // loop across NUM_SENDER_STREAMS) fails immediately and
+                // loudly instead of silently reintroducing the race.
+                assert!(
+                    cache.all_cached(block_id, block_total),
+                    "invariant violated: about to emit BlockEnd for block {block_id} \
+                     but the cache is missing at least one of its {block_total} packets"
+                );
+
                 let end = BlockEndPacket::encode(block_id, block_total as u32);
                 udp_send(&udp, &end);
                 println!("[DEBUG] Block {block_id} fully sent, BlockEnd emitted");

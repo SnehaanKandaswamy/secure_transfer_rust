@@ -91,6 +91,25 @@ impl SharedBlockCache {
             .collect()
     }
 
+    /// Returns true iff every packet `0..total` for `block_id` is present
+    /// in the cache. This is *not* needed for `fetch_for_retransmit` to be
+    /// correct -- it exists purely so callers (specifically the sender
+    /// loop, right before it emits `BlockEnd`) can assert the "fully
+    /// cached before BlockEnd" invariant at runtime instead of relying
+    /// only on reasoning about thread structure. If this ever returns
+    /// false where it's asserted, that means either the invariant's
+    /// single-sender-thread assumption has been broken (e.g. by wiring up
+    /// `NUM_SENDER_STREAMS` to parallelize the send loop) or a packet was
+    /// silently dropped before reaching `record_sent` -- either way it's a
+    /// real bug that should fail loudly, not be swallowed.
+    pub fn all_cached(&self, block_id: u32, total: usize) -> bool {
+        let guard = self.inner.lock().unwrap();
+        match guard.get(&block_id) {
+            Some(entry) => entry.packets.iter().take(total).all(|p| p.is_some()),
+            None => total == 0,
+        }
+    }
+
     pub fn complete(&self, block_id: u32) {
         self.inner.lock().unwrap().remove(&block_id);
     }
