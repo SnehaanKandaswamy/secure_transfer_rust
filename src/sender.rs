@@ -587,7 +587,7 @@ impl Sender {
         let mut packets_sent = 0u64;
         let mut retransmitted = 0u64;
         let mut completed = 0u32;
-        let mut next_print: u64 = 500 * 1024 * 1024;
+        let mut next_print: u64 = 100 * 1024 * 1024;
         let start = Instant::now();
         // The single source of truth for every block's lifecycle. See the
         // `BlockSlot` doc comment above: an id is `Pending`, `Open`, or
@@ -721,6 +721,7 @@ impl Sender {
                     // borrow released immediately) before deciding how to  
                     // resolve it -- avoids the get/insert borrow conflict
                     // entirely instead of fighting it.
+                    println!("[SENDER] Completed block {}", block_id);
                     enum Prior {
                         AlreadyResolved,
                         WasOpen,
@@ -941,9 +942,11 @@ impl Sender {
         for worker in workers {
             worker.join().unwrap()?;
         }
+        println!("[SENDER] Waiting for block manager...");
 
         let bytes_sent = manager_handle.join().unwrap()?;
 
+        println!("[SENDER] Block manager exited.");
         // The manager has resolved every block, but `ack_relay` is still
         // blocked in a TCP read waiting for a message the receiver will
         // never send again. Force it to unblock instead of leaving it

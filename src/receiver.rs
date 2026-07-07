@@ -257,6 +257,7 @@ fn ack_manager_loop(
             };
 
             if is_complete {
+                println!("[ACK] Block {} complete", block_id);
                 BlockAck::Complete { block_id }.write_to(&mut control)?;
                 state.remove(block_id);
                 completed += 1;
