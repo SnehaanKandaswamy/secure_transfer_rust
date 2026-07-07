@@ -722,6 +722,7 @@ impl Sender {
                     // resolve it -- avoids the get/insert borrow conflict
                     // entirely instead of fighting it.
                     println!("[SENDER] Completed block {}", block_id);
+                    #[derive(Debug)]
                     enum Prior {
                         AlreadyResolved,
                         WasOpen,
@@ -784,6 +785,14 @@ impl Sender {
                             
                         }
                     }
+                    println!(
+    "[DEBUG] block={} prior={:?} completed={}/{} open_slots={}",
+    block_id,
+    prior,
+    completed,
+    total_blocks,
+    open_slots
+);
                 }
             }
 
@@ -948,7 +957,6 @@ for (i, worker) in workers.into_iter().enumerate() {
 }
 
 println!("[DEBUG] All workers exited.");
-println!("[SENDER] Waiting for block manager...");
         println!("[SENDER] Waiting for block manager...");
 
         let bytes_sent = manager_handle.join().unwrap()?;
