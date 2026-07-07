@@ -238,13 +238,32 @@ impl Sender {
                 println!("[DEBUG] Block {block_id} opened ({block_total} packets)");
             }
 
-            udp_send(&udp, &chunk.packet);
+          udp_send(&udp, &chunk.packet);
             packets_sent += 1;
             bytes_sent += chunk.bytes as u64;
 
-            // Cache takes ownership of the datagram bytes for potential
-            // retransmission; we've already sent it above.
-            cache.record_sent(block_id, packet_in_block, block_total, chunk.packet);
+            if packet_in_block >= 250 {
+                println!(
+                    "[CACHE] About to cache block {} packet {}",
+                    block_id,
+                    packet_in_block
+                );
+            }
+
+            cache.record_sent(
+                block_id,
+                packet_in_block,
+                block_total,
+                chunk.packet,
+            );
+
+            if packet_in_block >= 250 {
+                println!(
+                    "[CACHE] Cached block {} packet {}",
+                    block_id,
+                    packet_in_block
+                );
+            }
 
             let count = sent_counts.get_mut(&block_id).unwrap();
             *count += 1;
@@ -273,6 +292,7 @@ impl Sender {
                 next_print += 500 * 1024 * 1024;
             }
         }
+        
 
         println!("==============================");
         println!("Block sender statistics");
