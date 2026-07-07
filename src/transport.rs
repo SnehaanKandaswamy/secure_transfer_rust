@@ -180,19 +180,39 @@ impl BlockRxEntry {
 #[derive(Clone)]
 pub struct SharedReceiverState {
     inner: Arc<Mutex<HashMap<u32, BlockRxEntry>>>,
+    // Block ids that have already been confirmed complete (or force-
+    // completed) and removed from `inner`. Needed because the sender may
+    // have queued more than one retransmit for the same still-missing
+    // packet before the receiver's first "Missing" report actually reached
+    // it - those extra copies are still in flight when the block finishes,
+    // and arrive afterward. Without this guard, `touch_activity` (which
+    // runs unconditionally on every raw packet arrival) would silently
+    // recreate a brand-new, empty tracking entry for an already-finished
+    // block via `entry(block_id).or_insert_with(...)`, restarting an entire
+    // repair cycle for a block that was already done and double-counting
+    // its completion.
+    completed_blocks: Arc<Mutex<std::collections::HashSet<u32>>>,
 }
 
 impl SharedReceiverState {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(HashMap::new())),
+            completed_blocks: Arc::new(Mutex::new(std::collections::HashSet::new())),
         }
+    }
+
+    fn is_completed(&self, block_id: u32) -> bool {
+        self.completed_blocks.lock().unwrap().contains(&block_id)
     }
 
     /// Called by the raw UDP receiver thread on every data packet, purely to
     /// keep the "is this block still active" timer fresh. Does NOT affect
     /// the received bitmap -- see the correctness note on `BlockRxEntry`.
     pub fn touch_activity(&self, block_id: u32, total: usize) {
+        if self.is_completed(block_id) {
+            return;
+        }
         let mut guard = self.inner.lock().unwrap();
         let entry = guard
             .entry(block_id)
@@ -204,6 +224,9 @@ impl SharedReceiverState {
     /// its checksum verified. This is the only thing that can mark a
     /// packet "received" for ack purposes.
     pub fn mark_verified(&self, block_id: u32, packet_in_block: u16, total: usize) {
+        if self.is_completed(block_id) {
+            return;
+        }
         let mut guard = self.inner.lock().unwrap();
         let entry = guard
             .entry(block_id)
@@ -217,6 +240,9 @@ impl SharedReceiverState {
 
     /// Records that a BlockEnd datagram arrived for this block.
     pub fn mark_end_seen(&self, block_id: u32, total: usize) {
+        if self.is_completed(block_id) {
+            return;
+        }
         let mut guard = self.inner.lock().unwrap();
         let entry = guard
             .entry(block_id)
@@ -268,9 +294,13 @@ impl SharedReceiverState {
 
     /// Removes a block's tracking state once it's confirmed complete (or
     /// given up on) so memory doesn't grow with the number of blocks seen
-    /// over the life of the transfer.
+    /// over the life of the transfer. Also remembers the block id as
+    /// completed so any late-arriving duplicate packets for it (e.g. an
+    /// extra retransmit copy still in flight when the block finished) are
+    /// recognized and ignored instead of recreating a fresh entry.
     pub fn remove(&self, block_id: u32) {
         self.inner.lock().unwrap().remove(&block_id);
+        self.completed_blocks.lock().unwrap().insert(block_id);
     }
 }
 
