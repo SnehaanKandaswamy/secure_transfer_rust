@@ -722,6 +722,11 @@ impl Sender {
                     );
                 }
                 SenderEvent::Ack(BlockAck::Missing { block_id, missing }) => {
+                                        println!(
+                        "[SENDER] Repair request: block {} missing {} packets",
+                        block_id,
+                        missing.len()
+                    );
                     // Read-only snapshot of exactly the cached packets we'd
                     // resend, taken and released before any further access
                     // to `block_states` (and before any I/O), so there's no

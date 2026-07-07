@@ -339,7 +339,17 @@ fn ack_manager_loop(
                 state.remove(block_id);
                 completed += 1;
             } else {
-                BlockAck::Missing { block_id, missing }.write_to(&mut control)?;
+                println!(
+    "[ACK] Block {} requesting {} missing packets",
+    block_id,
+    missing.len()
+);
+
+BlockAck::Missing {
+    block_id,
+    missing,
+}
+.write_to(&mut control)?;
             }
         }
 
