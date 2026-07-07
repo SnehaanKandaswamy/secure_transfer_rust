@@ -826,6 +826,23 @@ impl Sender {
      
                 }
             }
+            
+            if total_blocks - completed <= 5 {
+    println!(
+        "========== Remaining {} ==========",
+        total_blocks - completed
+    );
+
+    for (id, slot) in &block_states {
+        match slot {
+            BlockSlot::Open(_) => println!("OPEN {}", id),
+            BlockSlot::Pending(_) => println!("PENDING {}", id),
+            BlockSlot::Resolved => {}
+        }
+    }
+
+    println!("==================================");
+}
 
            
         }
