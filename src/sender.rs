@@ -937,11 +937,18 @@ impl Sender {
             )
         });
 
-        reader.join().unwrap()?;
+        println!("[DEBUG] Waiting for reader...");
+reader.join().unwrap()?;
+println!("[DEBUG] Reader exited.");
 
-        for worker in workers {
-            worker.join().unwrap()?;
-        }
+for (i, worker) in workers.into_iter().enumerate() {
+    println!("[DEBUG] Waiting for worker {i}...");
+    worker.join().unwrap()?;
+    println!("[DEBUG] Worker {i} exited.");
+}
+
+println!("[DEBUG] All workers exited.");
+println!("[SENDER] Waiting for block manager...");
         println!("[SENDER] Waiting for block manager...");
 
         let bytes_sent = manager_handle.join().unwrap()?;
