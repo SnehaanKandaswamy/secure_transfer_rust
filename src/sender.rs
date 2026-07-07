@@ -214,6 +214,14 @@ fn place_chunk(
 
     *packets_sent += 1;
     *bytes_sent += chunk.bytes as u64;
+    if *bytes_sent >= *next_print {
+    println!(
+        "[PROGRESS] Sent {:.1} MB",
+        *bytes_sent as f64 / (1024.0 * 1024.0)
+    );
+
+    *next_print += 100 * 1024 * 1024; // Print every 100 MB
+}
     entry.sent += 1;
 
     if entry.sent == entry.total && !entry.end_emitted {
@@ -585,6 +593,7 @@ impl Sender {
         let mut completed = 0u32;
         let mut next_print: u64 = 500 * 1024 * 1024;
         let start = Instant::now();
+        let mut next_progress_mb: u64 = 100;
         // The single source of truth for every block's lifecycle. See the
         // `BlockSlot` doc comment above: an id is `Pending`, `Open`, or
         // `Resolved` -- never more than one of those at once, and never
