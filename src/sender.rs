@@ -1,55 +1,80 @@
 //BEST
 //
 // ======================================================================
-// PROGRESS LOG
+// PROGRESS LOG -- concurrent state-machine audit + redesign
 // ======================================================================
 // ✔ ACK deadlock (ready_for_check ignoring completed blocks) -- fixed.
 // ✔ Shared retransmission cache -- working.
-// ✔ Blocks progress end-to-end -- working.
-// ✔ Complete ACKs received correctly -- working.
-// ✔ RACE: receiver requesting retransmission for packets the sender
-//   hadn't cached yet ("packet 255 present=false ... later cached") --
-//   FIXED below in `block_sender_loop`.
+// ✔ Send-before-cache race (BlockEnd sent-before-cached ordering) -- fixed
+//   by writing to the cache before the socket send.
 //
-//   Root cause: the send-loop called `udp_send()` BEFORE
-//   `cache.record_sent()`. UDP delivery (esp. on a fast/local link) could
-//   outrace the mutex-lock + insert, so the receiver could verify a
-//   packet and flag a *neighboring* one "missing" before that neighbor
-//   had actually made it into the cache. `fetch_for_retransmit()` would
-//   then find nothing to resend for a packet that genuinely had been
-//   sent, stalling that block's repair for a round trip (or more).
+// ✘ ROOT CAUSE of the "BlockEnd for block 2 twice" panic: this was never
+//   actually a double *emission*. It was two independent, unsynchronized
+//   authorities disagreeing about the lifecycle of the same block:
 //
-//   Fix: swapped the order so `cache.record_sent()` always completes
-//   before the packet is handed to the socket. See the comment at the
-//   call site in `block_sender_loop` for the full reasoning, and
-//   `transport.rs::fetch_for_retransmit` for the resulting invariant.
-//   No reorder buffer, sliding window, or state-machine redesign was
-//   needed -- this was purely an instruction-ordering bug.
+//     1. block_sender_loop's local counter -- "I've sent every packet in
+//        this block" (send-side truth).
+//     2. control_ack_loop's receipt of a TCP `BlockAck::Complete` --
+//        "the receiver confirms it has everything" (receive-side truth).
+//        Critically, this same message is *also* sent when a block blows
+//        through MAX_BLOCK_RETRY_ROUNDS and the receiver simply gives up
+//        -- i.e. it is not even always a true confirmation.
 //
-//   Status: FIXED and load-tested reasoning verified below -- please
-//   re-run your lossy Wi-Fi test and confirm the "resent 0 packets" log
-//   line disappears.
+//   Both authorities were allowed to mutate the *same* `SharedBlockCache`
+//   HashMap independently: block_sender_loop wrote packets into a block's
+//   entry via `record_sent`, while control_ack_loop could call
+//   `cache.complete(block_id)` -- which *removes* that entry -- the
+//   instant any Complete ack landed, including a force-completion that
+//   raced ahead of the sender actually finishing that block. A Mutex only
+//   guarantees the HashMap itself doesn't corrupt under concurrent
+//   access; it guarantees nothing about the *protocol* two threads are
+//   running against it. Sequence that produces exactly the observed log:
 //
-// ✔ VERIFIED: no execution path emits BlockEnd before every packet in
-//   that block has been cached.
+//     - control_ack_loop force-completes block 2 early (or a legitimate
+//       Complete lands unusually fast) -> cache.complete(2) wipes the
+//       entry.
+//     - block_sender_loop is still mid-block, still calling
+//       cache.record_sent(2, ..) for remaining packets -> `entry(2)
+//       .or_insert_with(..)` silently recreates a *new*, partially-filled
+//       entry for block 2.
+//     - when the local `sent_count` for block 2 (which never itself
+//       double-fires -- block ids are monotonic and never re-inserted)
+//       finally reaches `block_total`, the assert reads this
+//       just-recreated entry and finds it incomplete -> panic.
+//     - the ack thread, meanwhile, already believes block 2 is done and
+//       is blocked reading the next `BlockAck` for a block whose sender
+//       side just died -- hence "ack thread alive" forever.
 //
-//   block_sender_loop runs on exactly one thread (confirmed:
-//   NUM_SENDER_STREAMS in config.rs is unused dead config, never wired to
-//   spawn multiple sender threads). Within that thread, for the specific
-//   packet that brings a block's count to block_total, the statements
-//   execute in this strict program order: cache.record_sent() completes
-//   -> udp_send() of that packet -> count += 1 -> count == block_total
-//   check -> BlockEnd built and sent. There is no way for BlockEnd to be
-//   constructed before record_sent() has returned for every packet,
-//   including the last one.
+//   A second, independent defect was found while auditing point (6) of
+//   the requested audit ("can encryption workers finish out of order"):
+//   yes -- `NUM_WORKERS` workers pull off a shared queue and race to push
+//   onto `send_tx`, so packets can arrive at the sender loop out of order
+//   *across block boundaries*, not just within one block (within-block
+//   reordering was already handled correctly: index writes + a plain
+//   counter). If a packet from block N+1 is dequeued before the last
+//   packet of block N, and PIPELINE_DEPTH blocks are already open,
+//   `permits_rx.recv()` blocks the *only* thread that could ever consume
+//   block N's still-pending last packet -- a second, independent
+//   deadlock, unrelated to the panic above but from the same root cause:
+//   no single owner of block lifecycle, and implicit ordering
+//   assumptions nothing in the code enforced.
 //
-//   That said, this depended on an implicit "only one sender thread"
-//   assumption rather than something the code enforced. Added
-//   `SharedBlockCache::all_cached()` + a runtime `assert!` immediately
-//   before BlockEnd is emitted (see below), so if this assumption is ever
-//   broken by a future refactor (e.g. wiring up NUM_SENDER_STREAMS to
-//   parallelize sending), it fails loudly and immediately instead of
-//   silently reintroducing the exact race we just fixed.
+// REDESIGN: single-owner block manager (see `block_manager_loop` below).
+//   `SharedBlockCache` (transport.rs) is no longer used by the sender --
+//   block packet storage, counts, and the pipeline-depth budget are now
+//   plain (non-`Arc`, non-`Mutex`) local state owned by exactly one
+//   thread. Both encrypted chunks and incoming `BlockAck`s are funneled
+//   into that one thread as *events*, via two dumb relay threads that
+//   each own nothing but a socket/channel and forward what they read into
+//   one shared channel, so "did we finish sending this block" and "did
+//   the receiver confirm
+//   it" are evaluated in one consistent, serialized timeline instead of
+//   on two threads racing over a shared HashMap. A chunk that would open
+//   a new block beyond the pipeline budget is buffered locally rather
+//   than blocking the thread, which is what closes the encryption-worker
+//   reordering deadlock too: the same thread that would otherwise block
+//   on a permit is always still available to drain BlockAcks that free
+//   one up.
 // ======================================================================
 use anyhow::Result;
 use std::time::{Duration, Instant};
@@ -60,7 +85,7 @@ use rsa::{
     RsaPublicKey,
 };
 use sha2::Sha256;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use std::{
     io::{Read, Write},
@@ -82,7 +107,52 @@ use crate::pipeline::{
 };
 
 use crate::protocol::{DataPacket, BlockEndPacket, BlockAck};
-use crate::transport::{SharedBlockCache, block_of, packets_in_block, total_blocks};
+use crate::transport::{block_of, packets_in_block, total_blocks};
+
+// ---------------------------------------------------------------------
+// Per-block state, owned exclusively by `Sender::block_manager_loop`.
+// Lives at module scope because `struct`/`enum`/`impl` items cannot be
+// declared inside an `impl` block in Rust.
+//
+// State machine per block:
+//
+//   Sending { .. }  -- packets arriving, cache filling up
+//        │  (sent_count reaches total)
+//        ▼
+//   AwaitingAck { .. }  -- BlockEnd emitted exactly once (end_emitted),
+//        │                cache kept around only to serve retransmits
+//        │  (BlockAck::Complete, real or force-completed)
+//        ▼
+//   removed from the map, pipeline slot released
+// ---------------------------------------------------------------------
+struct BlockState {
+    total: usize,
+    packets: Vec<Option<Vec<u8>>>,
+    sent: usize,
+    end_emitted: bool,
+}
+
+impl BlockState {
+    fn new(total: usize) -> Self {
+        Self {
+            total,
+            packets: vec![None; total],
+            sent: 0,
+            end_emitted: false,
+        }
+    }
+
+    fn all_cached(&self) -> bool {
+        self.packets.iter().take(self.total).all(|p| p.is_some())
+    }
+}
+
+/// Events funneled into the single-owner block manager thread by the two
+/// dumb relay threads (`Sender::chunk_relay`, `Sender::ack_relay`).
+enum SenderEvent {
+    Chunk(EncryptedChunk),
+    Ack(BlockAck),
+}
 
 pub struct Sender {
     tcp: TcpStream,
@@ -238,175 +308,202 @@ impl Sender {
     }
 
     // ------------------------------------------------------------------
-    // Block-pipelined send loop (Pipeline Manager + UDP Sender stages).
+    // Single-owner block state manager.
     //
-    // Sends every packet in a block back-to-back with no sleeps and no
-    // pacing. Once it has sent every packet currently belonging to a
-    // block, it emits a BlockEnd datagram for that block. The only place
-    // this loop ever waits is `permits_rx.recv()`, which blocks *only*
-    // when PIPELINE_DEPTH blocks are already open and unconfirmed -- i.e.
-    // genuine backpressure from outstanding repairs, never a fixed timer.
+    // Replaces `block_sender_loop` + `control_ack_loop`. Exactly one
+    // thread now owns every piece of a block's lifecycle: its cached
+    // packets, its sent-count, whether BlockEnd has been emitted, and
+    // whether it has been confirmed/force-completed. Both event sources
+    // that used to run on separate threads -- encrypted chunks arriving
+    // from the workers, and BlockAcks arriving over TCP -- are read by a
+    // tiny dedicated relay thread each and forwarded as `SenderEvent`s
+    // into one channel this thread selects over. That turns "did we
+    // finish sending this block" and "did the receiver confirm it" into
+    // a single serialized timeline instead of two threads racing over a
+    // shared `Mutex<HashMap<..>>`.
+    //
+    // State machine per block (`BlockState`):
+    //
+    //   Sending { .. }  -- packets arriving, cache filling up
+    //        │  (sent_count reaches total)
+    //        ▼
+    //   AwaitingAck { .. }  -- BlockEnd emitted exactly once, cache kept
+    //        │                around only to serve retransmits
+    //        │  (BlockAck::Complete, real or force-completed)
+    //        ▼
+    //   removed from the map, pipeline slot released
+    //
+    // `BlockAck::Missing` is only ever served out of `Sending` or
+    // `AwaitingAck` state -- if the block id isn't present at all (e.g. a
+    // stray/duplicate ack after completion), it's a no-op instead of a
+    // panic, and is logged as an anomaly rather than corrupting shared
+    // state, because there is no second thread that could have raced to
+    // remove it in the meantime.
     // ------------------------------------------------------------------
-    fn block_sender_loop(
+    // ------------------------------------------------------------------
+    // Pure I/O relay: reads encrypted chunks off the pipeline channel and
+    // forwards them as events. Touches no block state whatsoever.
+    // ------------------------------------------------------------------
+    fn chunk_relay(rx: Receiver<EncryptedChunk>, tx: ChannelSender<SenderEvent>) {
+        while let Ok(chunk) = rx.recv() {
+            if tx.send(SenderEvent::Chunk(chunk)).is_err() {
+                break;
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Pure I/O relay: reads BlockAcks off the TCP control stream and
+    // forwards them as events. Touches no block state whatsoever. Exits
+    // (rather than hanging forever) as soon as the read errors out, which
+    // is exactly what happens when `block_manager_loop` below shuts the
+    // control socket down after every block is resolved.
+    // ------------------------------------------------------------------
+    fn ack_relay(mut control: TcpStream, tx: ChannelSender<SenderEvent>) {
+        loop {
+            let ack = match BlockAck::read_from(&mut control) {
+                Ok(ack) => ack,
+                Err(_) => break,
+            };
+            if tx.send(SenderEvent::Ack(ack)).is_err() {
+                break;
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // The single owner of block lifecycle state. Sends data + BlockEnd
+    // over UDP, retransmits on request, and frees blocks on confirmation
+    // -- all from one thread, so none of it can race with itself.
+    //
+    // Backpressure: chunks that would open a block beyond `PIPELINE_DEPTH`
+    // are buffered in `pending` instead of blocking the thread. This is
+    // what closes the encryption-worker-reordering deadlock: this same
+    // thread is always free to keep draining `events` (including the
+    // BlockAcks that free up a slot), so a late-arriving packet for an
+    // already-open block, or a block that only *looks* like it needs a
+    // new slot because of out-of-order worker completion, never wedges
+    // the pipeline the way blocking on a permit channel could.
+    // ------------------------------------------------------------------
+    fn block_manager_loop(
         udp: UdpSocket,
-        rx: Receiver<EncryptedChunk>,
+        events: Receiver<SenderEvent>,
         total_chunks: u32,
-        cache: SharedBlockCache,
-        permits_rx: Receiver<()>,
+        pipeline_depth: usize,
+        total_blocks: u32,
     ) -> Result<u64> {
         let mut bytes_sent = 0u64;
         let mut packets_sent = 0u64;
-        let mut opened_blocks: HashSet<u32> = HashSet::new();
-        let mut sent_counts: HashMap<u32, usize> = HashMap::new();
+        let mut retransmitted = 0u64;
+        let mut completed = 0u32;
         let mut next_print: u64 = 500 * 1024 * 1024;
         let mut last_status_print = Instant::now();
+        let mut last_missing_print = Instant::now();
 
-        println!("Block sender thread started");
+        let mut blocks: HashMap<u32, BlockState> = HashMap::new();
+        let mut pending: std::collections::VecDeque<EncryptedChunk> = std::collections::VecDeque::new();
 
-        // A single UDP send failure (transient OS/network hiccup) used to
-        // be treated as fatal via `?`, killing the entire transfer over one
-        // bad packet. UDP sends are expected to occasionally fail - that's
-        // the whole reason this protocol has a repair mechanism - so log
-        // and move on instead; a lost initial send just shows up as
-        // "missing" in the next BlockAck like any other dropped packet.
+        println!("Block manager thread started");
+
         let udp_send = |udp: &UdpSocket, packet: &[u8]| {
             if let Err(e) = udp.send(packet) {
                 eprintln!("udp send failed (non-fatal, will retry): {e}");
             }
         };
 
-        while let Ok(chunk) = rx.recv() {
+        // Processes one already-dequeued chunk. Returns it back (`Some`)
+        // instead of consuming it if it can't be admitted yet because the
+        // pipeline is at capacity and this chunk would open a new block --
+        // the caller is responsible for buffering it in that case.
+        let mut handle_chunk = |chunk: EncryptedChunk,
+                                 blocks: &mut HashMap<u32, BlockState>,
+                                 bytes_sent: &mut u64,
+                                 packets_sent: &mut u64,
+                                 next_print: &mut u64|
+         -> Option<EncryptedChunk> {
             let (block_id, packet_in_block) = block_of(chunk.chunk_id);
             let block_total = packets_in_block(block_id, total_chunks);
 
-            if !opened_blocks.contains(&block_id) {
-                // Backpressure gate: wait for a free pipeline slot. Under
-                // normal conditions this never blocks because blocks keep
-                // completing continuously; it only engages when repairs
-                // are genuinely lagging.
-                permits_rx.recv()?;
-                opened_blocks.insert(block_id);
-                sent_counts.insert(block_id, 0);
-                println!("[DEBUG] Block {block_id} opened ({block_total} packets)");
+            if !blocks.contains_key(&block_id) && blocks.len() >= pipeline_depth {
+                return Some(chunk);
             }
 
-            // CORRECTNESS-CRITICAL ORDERING: the packet must be recorded in
-            // the retransmission cache *before* it is ever put on the wire.
-            // Sending first (as the old code did) opens a window where the
-            // datagram can reach the receiver, get decrypted/verified, and
-            // trigger a "missing packet" repair check for a neighboring
-            // packet before record_sent() has actually run -- at which
-            // point fetch_for_retransmit() finds nothing to resend for a
-            // packet that was, in fact, already sent. Caching first closes
-            // that window entirely: by the time a packet can possibly be
-            // observed by the receiver, it is unconditionally already in
-            // the cache.
-            let to_send = chunk.packet.clone();
-            cache.record_sent(
-                block_id,
-                packet_in_block,
-                block_total,
-                chunk.packet,
-            );
+            let entry = blocks
+                .entry(block_id)
+                .or_insert_with(|| {
+                    println!("[DEBUG] Block {block_id} opened ({block_total} packets)");
+                    BlockState::new(block_total)
+                });
 
-            udp_send(&udp, &to_send);
-            packets_sent += 1;
-            bytes_sent += chunk.bytes as u64;
+            // Cache-before-send ordering, unchanged from the earlier fix --
+            // still correct, and now the only thread that can ever touch
+            // this entry, so there is no window for anything to remove it
+            // out from under this write either.
+            entry.packets[packet_in_block as usize] = Some(chunk.packet.clone());
+            udp_send(&udp, &chunk.packet);
 
-            let count = sent_counts.get_mut(&block_id).unwrap();
-            *count += 1;
+            *packets_sent += 1;
+            *bytes_sent += chunk.bytes as u64;
+            entry.sent += 1;
 
-            if *count == block_total {
-                // Runtime enforcement of the "fully cached before BlockEnd"
-                // invariant -- see SharedBlockCache::all_cached. This holds
-                // today because block_sender_loop runs on exactly one
-                // thread (record_sent/udp_send/count-increment/this check
-                // are strict program order), but it's asserted here rather
-                // than left as an implicit assumption so that any future
-                // change breaking that assumption (e.g. parallelizing this
-                // loop across NUM_SENDER_STREAMS) fails immediately and
-                // loudly instead of silently reintroducing the race.
+            if entry.sent == entry.total && !entry.end_emitted {
+                // This assert can now never fire from a concurrent-mutation
+                // race: this thread is the only writer and only remover of
+                // block state, so `all_cached()` reflects exactly what this
+                // same thread just finished writing.
                 assert!(
-                    cache.all_cached(block_id, block_total),
+                    entry.all_cached(),
                     "invariant violated: about to emit BlockEnd for block {block_id} \
                      but the cache is missing at least one of its {block_total} packets"
                 );
-
                 let end = BlockEndPacket::encode(block_id, block_total as u32);
                 udp_send(&udp, &end);
+                entry.end_emitted = true;
                 println!("[DEBUG] Block {block_id} fully sent, BlockEnd emitted");
             }
 
-            if last_status_print.elapsed() > Duration::from_secs(1) {
-                println!(
-                    "[DEBUG] sender: packets_sent={} sent={:.2}MB blocks_open={}",
-                    packets_sent,
-                    bytes_sent as f64 / (1024.0 * 1024.0),
-                    opened_blocks.len()
-                );
-                last_status_print = Instant::now();
+            if *bytes_sent >= *next_print {
+                println!("Sent {:.2} MB", *bytes_sent as f64 / (1024.0 * 1024.0));
+                *next_print += 500 * 1024 * 1024;
             }
 
-            if bytes_sent >= next_print {
-                println!(
-                    "Sent {:.2} MB",
-                    bytes_sent as f64 / (1024.0 * 1024.0)
-                );
-                next_print += 500 * 1024 * 1024;
-            }
-        }
-        
-
-        println!("==============================");
-        println!("Block sender statistics");
-        println!("Packets sent : {}", packets_sent);
-        println!("Blocks opened: {}", opened_blocks.len());
-        println!("==============================");
-
-        Ok(bytes_sent)
-    }
-
-    // ------------------------------------------------------------------
-    // Control-ack listener. Runs concurrently with block_sender_loop (not
-    // as a separate phase afterwards) so that repairing an early block
-    // never stalls later blocks from being sent. Reacts to two message
-    // types from the receiver:
-    //   - Missing: retransmit exactly the requested packets for that block.
-    //   - Complete: free that block's cache and return a pipeline permit.
-    // Stops once every block has been confirmed complete.
-    // ------------------------------------------------------------------
-    fn control_ack_loop(
-        mut control: TcpStream,
-        udp: UdpSocket,
-        cache: SharedBlockCache,
-        permits_tx: ChannelSender<()>,
-        total_blocks: u32,
-    ) -> Result<()> {
-        let mut completed = 0u32;
-        let mut retransmitted = 0u64;
-        let start = Instant::now();
-        let mut last_missing_print = Instant::now();
-
-        println!("Control-ack loop started, awaiting {} block(s)", total_blocks);
+            None
+        };
 
         while completed < total_blocks {
-            let ack = BlockAck::read_from(&mut control)?;
+            let event = events.recv()?;
 
-            match ack {
-                BlockAck::Missing { block_id, missing } => {
-                    let packets = cache.fetch_for_retransmit(block_id, &missing);
+            match event {
+                SenderEvent::Chunk(chunk) => {
+                    if let Some(chunk) =
+                        handle_chunk(chunk, &mut blocks, &mut bytes_sent, &mut packets_sent, &mut next_print)
+                    {
+                        // Pipeline is full and this chunk would open a new
+                        // block -- buffer it. It'll be retried the moment a
+                        // block completes below, never by blocking this
+                        // thread (which would also stall draining acks).
+                        pending.push_back(chunk);
+                    }
+                }
+                SenderEvent::Ack(BlockAck::Missing { block_id, missing }) => {
+                    let Some(entry) = blocks.get(&block_id) else {
+                        // No second thread can have removed this out from
+                        // under us -- this means the receiver is asking
+                        // about a block we've already resolved (e.g. a
+                        // stray repeat ack). Safe to ignore.
+                        continue;
+                    };
                     let mut sent_this_round = 0u64;
-                    for packet in &packets {
-                        if let Err(e) = udp.send(packet) {
-                            eprintln!("udp resend failed (non-fatal, will retry): {e}");
-                        } else {
-                            retransmitted += 1;
-                            sent_this_round += 1;
+                    for &id in &missing {
+                        if let Some(Some(packet)) = entry.packets.get(id as usize) {
+                            if let Err(e) = udp.send(packet) {
+                                eprintln!("udp resend failed (non-fatal, will retry): {e}");
+                            } else {
+                                retransmitted += 1;
+                                sent_this_round += 1;
+                            }
                         }
                     }
-                    // Throttled so a block stuck in repeated repair rounds
-                    // doesn't flood the console - one line per second is
-                    // enough to confirm it's actively retrying.
                     if last_missing_print.elapsed() > Duration::from_secs(1) {
                         println!(
                             "[DEBUG] block {block_id}: {} missing, resent {sent_this_round} packet(s)",
@@ -415,29 +512,51 @@ impl Sender {
                         last_missing_print = Instant::now();
                     }
                 }
-                BlockAck::Complete { block_id } => {
-                    cache.complete(block_id);
+                SenderEvent::Ack(BlockAck::Complete { block_id }) => {
+                    if blocks.remove(&block_id).is_none() {
+                        println!("[WARN] Complete ack for unknown/already-resolved block {block_id}");
+                    }
                     completed += 1;
-                    println!(
-                        "[DEBUG] block {block_id} complete ({completed}/{total_blocks} blocks done)"
-                    );
-                    // Return a slot to the pipeline. If the sender loop has
-                    // already finished and dropped its receiver (shouldn't
-                    // happen before this loop exits, but stay defensive),
-                    // just ignore the send failure.
-                    let _ = permits_tx.send(());
+                    println!("[DEBUG] block {block_id} complete ({completed}/{total_blocks} blocks done)");
+
+                    // A slot just freed up -- try to admit buffered chunks
+                    // now, including ones that open brand new blocks.
+                    while let Some(chunk) = pending.pop_front() {
+                        if let Some(chunk) =
+                            handle_chunk(chunk, &mut blocks, &mut bytes_sent, &mut packets_sent, &mut next_print)
+                        {
+                            // Still can't admit (another slot is still
+                            // full) -- put it back at the front and stop.
+                            // This can't happen right after freeing exactly
+                            // one slot unless pipeline_depth == 0, but stay
+                            // defensive.
+                            pending.push_front(chunk);
+                            break;
+                        }
+                    }
                 }
+            }
+
+            if last_status_print.elapsed() > Duration::from_secs(1) {
+                println!(
+                    "[DEBUG] sender: packets_sent={} sent={:.2}MB blocks_open={} pending_chunks={}",
+                    packets_sent,
+                    bytes_sent as f64 / (1024.0 * 1024.0),
+                    blocks.len(),
+                    pending.len()
+                );
+                last_status_print = Instant::now();
             }
         }
 
-        println!(
-            "Control-ack loop: all {} block(s) confirmed complete in {:.3?} ({} packets retransmitted).",
-            total_blocks,
-            start.elapsed(),
-            retransmitted
-        );
+        println!("==============================");
+        println!("Block manager statistics");
+        println!("Packets sent        : {}", packets_sent);
+        println!("Packets retransmitted: {}", retransmitted);
+        println!("Blocks resolved      : {}", completed);
+        println!("==============================");
 
-        Ok(())
+        Ok(bytes_sent)
     }
 
     fn handshake(&mut self) -> Result<()> {
@@ -505,21 +624,21 @@ impl Sender {
         let nonce = self.nonce;
 
         let udp_send = self.udp.try_clone()?;
-        let udp_control = self.udp.try_clone()?;
         let control_stream = self.tcp.try_clone()?;
-
-        let cache = SharedBlockCache::new();
-
-        // Semaphore-style permit channel: pre-loaded with PIPELINE_DEPTH
-        // tokens. Opening a new block consumes one; confirming a block
-        // complete returns one. This is the entire flow-control mechanism
-        // for the transport -- no cwnd, no per-packet timers.
-        let (permits_tx, permits_rx) = bounded::<()>(PIPELINE_DEPTH);
-        for _ in 0..PIPELINE_DEPTH {
-            permits_tx.send(())?;
-        }
+        // Kept only so we can force `ack_relay`'s blocking TCP read to
+        // error out once every block is resolved -- see the shutdown call
+        // near the end of this function.
+        let control_stream_for_shutdown = self.tcp.try_clone()?;
 
         let total_blocks_count = total_blocks(total_chunks);
+
+        // Unbounded on purpose: this channel just merges two event
+        // sources for a single consumer thread. Backpressure is enforced
+        // upstream, by the bounded `send_rx` channel (which in turn
+        // throttles the encryption workers) and by `block_manager_loop`'s
+        // own `pending` buffer -- not by this channel, so that a burst of
+        // chunks can never make an incoming BlockAck wait behind them.
+        let (events_tx, events_rx) = crossbeam_channel::unbounded::<SenderEvent>();
 
         // Reader
         let reader = std::thread::spawn(move || {
@@ -552,27 +671,28 @@ impl Sender {
 
         drop(send_tx);
 
-        // Control-ack listener -- runs concurrently with the block sender.
-        let cache_for_control = cache.clone();
-        let control_handle = std::thread::spawn(move || {
-            Self::control_ack_loop(
-                control_stream,
-                udp_control,
-                cache_for_control,
-                permits_tx,
-                total_blocks_count,
-            )
+        // Dumb I/O relay: encrypted chunks -> events. Owns no block state.
+        let chunk_events_tx = events_tx.clone();
+        let chunk_relay_handle = std::thread::spawn(move || {
+            Self::chunk_relay(send_rx, chunk_events_tx);
         });
 
-        // Block-pipelined sender
-        let sender_cache = cache.clone();
-        let sender_handle = std::thread::spawn(move || {
-            Self::block_sender_loop(
+        // Dumb I/O relay: BlockAcks off TCP -> events. Owns no block state.
+        let ack_events_tx = events_tx.clone();
+        let ack_relay_handle = std::thread::spawn(move || {
+            Self::ack_relay(control_stream, ack_events_tx);
+        });
+        drop(events_tx);
+
+        // The single owner of every block's lifecycle. Runs until every
+        // block has been resolved (confirmed complete or force-completed).
+        let manager_handle = std::thread::spawn(move || {
+            Self::block_manager_loop(
                 udp_send,
-                send_rx,
+                events_rx,
                 total_chunks,
-                sender_cache,
-                permits_rx,
+                PIPELINE_DEPTH,
+                total_blocks_count,
             )
         });
 
@@ -582,13 +702,20 @@ impl Sender {
             worker.join().unwrap()?;
         }
 
-        let bytes_sent = sender_handle.join().unwrap()?;
+        let bytes_sent = manager_handle.join().unwrap()?;
 
-        // Blocks until every block has been confirmed complete, handling
-        // repairs as they arrive. This replaces the old sequential
-        // "retransmission phase" -- repairs now happen throughout the
-        // transfer instead of only after the entire file has been blasted.
-        control_handle.join().unwrap()?;
+        // The manager has resolved every block, but `ack_relay` is still
+        // blocked in a TCP read waiting for a message the receiver will
+        // never send again. Force it to unblock instead of leaving it
+        // (harmlessly, but permanently) parked -- this is the fix for
+        // "the ack thread can wait forever after the sender is done".
+        let _ = control_stream_for_shutdown.shutdown(std::net::Shutdown::Both);
+        ack_relay_handle.join().unwrap();
+
+        // chunk_relay exits on its own once `send_rx` disconnects (all
+        // workers finished and `send_tx` was dropped above), which has
+        // already happened by the time we get here.
+        chunk_relay_handle.join().unwrap();
 
         Ok(bytes_sent)
     }
