@@ -72,6 +72,9 @@ fn receiver_thread(
     let mut malformed = 0u64;
     let mut last_status_print = Instant::now();
     let mut last_packet = Instant::now();
+    use std::collections::HashMap;
+
+let mut recv_count: HashMap<u32, usize> = HashMap::new();
     while running.load(Ordering::Acquire) {
         let t = Instant::now();
         match udp.recv_from(&mut buffer) {
@@ -123,6 +126,7 @@ let Some(pkt) = DataPacket::decode(body) else {
     malformed += 1;
     continue;
 };
+*recv_count.entry(pkt.block_id).or_insert(0) += 1;
 
 let decode_time = decode_start.elapsed();
 
@@ -166,13 +170,22 @@ if waited > Duration::from_millis(2) {
         }
     }
                     TAG_BLOCK_END => {
-                        let Some((block_id, total_packets)) = BlockEndPacket::decode(body) else {
-                            malformed += 1;
-                            continue;
-                        };
-                        block_ends += 1;
-                        state.mark_end_seen(block_id, total_packets as usize);
-                    }
+    let Some((block_id, total_packets)) = BlockEndPacket::decode(body) else {
+        malformed += 1;
+        continue;
+    };
+
+    let count = recv_count.remove(&block_id).unwrap_or(0);
+
+    println!(
+        "[UDP RECEIVED] block {} -> {} packets",
+        block_id,
+        count
+    );
+
+    block_ends += 1;
+    state.mark_end_seen(block_id, total_packets as usize);
+}
                     _ => {
                         malformed += 1;
                     }
