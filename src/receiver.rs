@@ -17,6 +17,7 @@ use rsa::{
 
 use sha2::Sha256;
 
+
 use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream, UdpSocket},
@@ -43,7 +44,7 @@ use crate::config::{
 };
 use crate::protocol::{DataPacket, BlockEndPacket, BlockAck, TAG_DATA, TAG_BLOCK_END};
 use crate::transport::{SharedReceiverState, chunk_id_of, packets_in_block, total_blocks};
-
+const ACK_DEBUG: bool = false;
 // ------------------------------------------------------------------------
 // Raw UDP receiver thread. Demultiplexes incoming datagrams by their tag
 // byte into either data packets (forwarded to decryption workers) or
@@ -98,23 +99,20 @@ fn receiver_thread(
                         state.touch_activity(pkt.block_id, total);
 
                         let chunk_id = chunk_id_of(pkt.block_id, pkt.packet_in_block);
+                        let t = Instant::now();
+                        tx.send(ReceivedPacket {
+                            chunk_id,
+                            block_id: pkt.block_id,
+                            packet_in_block: pkt.packet_in_block,
+                            encrypted: pkt.payload,
+                            hash: pkt.hash,
+                        })?;
+                        let waited = t.elapsed();
 
-                        let send_start = Instant::now();
-
-tx.send(ReceivedPacket {
-    chunk_id,
-    block_id: pkt.block_id,
-    packet_in_block: pkt.packet_in_block,
-    encrypted: pkt.payload,
-    hash: pkt.hash,
-})?;
-
-let stall = send_start.elapsed();
-
-if stall > Duration::from_millis(1) {
+if waited > Duration::from_millis(2) {
     println!(
-        "[STALL] packet_tx blocked for {:?}",
-        stall
+        "[BACKPRESSURE] packet channel blocked {:?}",
+        waited
     );
 }
                     }
@@ -194,11 +192,20 @@ fn worker_thread(
 
         let total = packets_in_block(packet.block_id, expected_chunks);
         state.mark_verified(packet.block_id, packet.packet_in_block, total);
-
+        let t = Instant::now();
         tx.send(DecryptedChunk {
             chunk_id: packet.chunk_id,
             data: decrypted,
         })?;
+        
+let waited = t.elapsed();
+
+if waited > Duration::from_millis(2) {
+    println!(
+        "[BACKPRESSURE] writer channel blocked {:?}",
+        waited
+    );
+}
     }
 
     println!("Worker finished.");
