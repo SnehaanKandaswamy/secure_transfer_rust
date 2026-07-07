@@ -615,20 +615,7 @@ impl Sender {
                 &mut packets_sent,
                 &mut next_print,
             );
-            if completed + 5 >= total_blocks {
-        println!("----- unresolved -----");
-
-        for (id, slot) in &block_states {
-            match slot {
-                BlockSlot::Open(_) => println!("{id} -> OPEN"),
-                BlockSlot::Pending(_) => println!("{id} -> PENDING"),
-                BlockSlot::Resolved => {}
-            }
-        }
-
-        println!("----------------------");
-    }
-
+            
             if completed >= total_blocks {
     println!(
         "[EXIT] completed={} total={} open_slots={}",
@@ -638,12 +625,7 @@ impl Sender {
     );
     break;
 }           
-println!(
-    "[LOOP] completed={} total={} open_slots={}",
-    completed,
-    total_blocks,
-    open_slots
-);
+
             let event = match events.recv() {
                 Ok(event) => event,
                 Err(_) => {
