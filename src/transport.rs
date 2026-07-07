@@ -217,11 +217,7 @@ impl SharedReceiverState {
             completed_blocks: Arc::new(Mutex::new(std::collections::HashSet::new())),
         }
     }
-    pub fn debug_counts(&self) -> (usize, usize) {
-    let tracked = self.inner.lock().unwrap().len();
-    let completed = self.completed_blocks.lock().unwrap().len();
-    (tracked, completed)
-}
+   
 
     fn is_completed(&self, block_id: u32) -> bool {
         self.completed_blocks.lock().unwrap().contains(&block_id)
@@ -256,14 +252,7 @@ impl SharedReceiverState {
         if idx < entry.received.len() && !entry.received[idx] {
             entry.received[idx] = true;
             entry.received_count += 1;
-            if block_id == 0 {
-    println!(
-        "[VERIFY] block {} received packet {} ({}/{})",
-        block_id,
-        idx,
-        entry.received_count,
-        entry.total
-    );
+   
 }
         }
     }
@@ -279,11 +268,7 @@ impl SharedReceiverState {
             .or_insert_with(|| BlockRxEntry::new(total));
         entry.end_seen = true;
         entry.last_activity = Instant::now();
-        println!(
-    "[END] block {} total {}",
-    block_id,
-    total
-);  
+        
     }
 
     /// Returns block ids ready to be checked right now: either BlockEnd was
@@ -301,21 +286,8 @@ impl SharedReceiverState {
     let guard = self.inner.lock().unwrap();
     let now = Instant::now();
 
-    println!("---------------------");
-    println!("Tracking {} blocks", guard.len());
 
-    for (&id, e) in guard.iter() {
-        println!(
-            "Block {} | complete={} end_seen={} received={}/{} rounds={} elapsed={:?}",
-            id,
-            e.is_complete(),
-            e.end_seen,
-            e.received_count,
-            e.received.len(),
-            e.rounds,
-            now.duration_since(e.last_activity),
-        );
-    }
+    
 
     let ready = guard
         .iter()
@@ -345,7 +317,6 @@ impl SharedReceiverState {
         .map(|(&id, _)| id)
         .collect::<Vec<_>>();
 
-    println!("Ready: {:?}", ready);
 
     ready
 }
@@ -367,7 +338,6 @@ impl SharedReceiverState {
     /// extra retransmit copy still in flight when the block finished) are
     /// recognized and ignored instead of recreating a fresh entry.
     pub fn remove(&self, block_id: u32) {
-    println!("[REMOVE] block {}", block_id);
 
     self.inner.lock().unwrap().remove(&block_id);
     self.completed_blocks.lock().unwrap().insert(block_id);
