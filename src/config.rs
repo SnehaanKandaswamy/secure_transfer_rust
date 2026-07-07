@@ -48,7 +48,7 @@ pub const PACKETS_PER_BLOCK: usize = 256;
 // keep arriving. 3-4 is the sweet spot the design calls for -- enough to
 // keep the network saturated across the RTTs seen on Wi-Fi, without
 // unbounded cache growth if repairs lag behind.
-pub const PIPELINE_DEPTH: usize = 2;
+pub const PIPELINE_DEPTH: usize = 4;
 
 // After a BlockEnd (or, on the receiver side, after a quiet period with no
 // new packets for the active block), wait this long before checking for
@@ -66,13 +66,13 @@ pub const PIPELINE_DEPTH: usize = 2;
 // previous retransmit had any chance to land, burning through
 // MAX_BLOCK_RETRY_ROUNDS in well under half a second and force-completing
 // blocks that were still genuinely missing data (silent corruption).
-pub const BLOCK_GRACE_PERIOD_MS: u64 = 150;
+pub const BLOCK_GRACE_PERIOD_MS: u64 = 20;
 
 // If no packets at all arrive for the currently-active block for this long,
 // the receiver proactively checks it rather than waiting indefinitely for a
 // BlockEnd that may have been lost. This is what prevents a lost BlockEnd
 // from ever stalling the transfer.
-pub const BLOCK_IDLE_TIMEOUT_MS: u64 = 300;
+pub const BLOCK_IDLE_TIMEOUT_MS: u64 = 100;
 
 // Safety valve: if a single block still isn't complete after this many
 // repair rounds, give up on it (log and move on) rather than retrying
