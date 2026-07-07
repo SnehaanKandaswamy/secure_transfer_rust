@@ -315,23 +315,27 @@ impl SharedReceiverState {
     let ready = guard
         .iter()
         .filter(|(_, e)| {
-            if e.end_seen && e.is_complete() {
-                return true;
-            }
+                let elapsed = now.duration_since(e.last_activity);
 
-            if e.is_complete() {
-                return false;
-            }
-
-            let elapsed = now.duration_since(e.last_activity);
-
+        // Block is complete.
+        if e.is_complete() {
+            // If we saw BlockEnd, wait the normal grace period.
             if e.end_seen {
-                let required =
-                    grace.saturating_mul(e.rounds + 1).min(idle_timeout);
-                elapsed >= required
-            } else {
-                elapsed >= idle_timeout
+                return elapsed >= grace;
             }
+
+            // If BlockEnd was lost, don't wait forever.
+            return elapsed >= idle_timeout;
+        }
+
+        // Block is incomplete.
+        if e.end_seen {
+            let required =
+                grace.saturating_mul(e.rounds + 1).min(idle_timeout);
+            elapsed >= required
+        } else {
+            elapsed >= idle_timeout
+        }
         })
         .map(|(&id, _)| id)
         .collect::<Vec<_>>();
