@@ -279,20 +279,28 @@ impl SharedReceiverState {
         );
     }
 
-    guard
-        .iter()
-        .filter(|(_, e)| !e.is_complete())
-        .filter(|(_, e)| {
-            let elapsed = now.duration_since(e.last_activity);
-            if e.end_seen {
-                let required = grace.saturating_mul(e.rounds + 1).min(idle_timeout);
-                elapsed >= required
-            } else {
-                elapsed >= idle_timeout
-            }
-        })
-        .map(|(&id, _)| id)
-        .collect()
+   guard
+    .iter()
+    .filter(|(_, e)| {
+        if e.end_seen && e.is_complete() {
+            return true;
+        }
+
+        if e.is_complete() {
+            return false;
+        }
+
+        let elapsed = now.duration_since(e.last_activity);
+
+        if e.end_seen {
+            let required = grace.saturating_mul(e.rounds + 1).min(idle_timeout);
+            elapsed >= required
+        } else {
+            elapsed >= idle_timeout
+        }
+    })
+    .map(|(&id, _)| id)
+    .collect()
 }
     /// Snapshots a block's state for building an ack, and bumps its retry
     /// round counter (checked against MAX_BLOCK_RETRY_ROUNDS by the caller).
