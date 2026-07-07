@@ -64,16 +64,35 @@ impl SharedBlockCache {
             .or_insert_with(|| BlockCacheEntry::new(total));
         entry.packets[packet_in_block as usize] = Some(datagram);
     }
+pub fn fetch_for_retransmit(&self, block_id: u32, ids: &[u16]) -> Vec<Vec<u8>> {
+    let guard = self.inner.lock().unwrap();
 
-    pub fn fetch_for_retransmit(&self, block_id: u32, ids: &[u16]) -> Vec<Vec<u8>> {
-        let guard = self.inner.lock().unwrap();
-        let Some(entry) = guard.get(&block_id) else {
-            return Vec::new();
-        };
-        ids.iter()
-            .filter_map(|&id| entry.packets.get(id as usize).and_then(|p| p.clone()))
-            .collect()
+    let Some(entry) = guard.get(&block_id) else {
+        println!("No cache entry for block {}", block_id);
+        return Vec::new();
+    };
+
+    println!(
+        "Retransmit request: block={} cache_size={} missing={:?}",
+        block_id,
+        entry.packets.len(),
+        ids
+    );
+
+    for &id in ids {
+        let present = entry
+            .packets
+            .get(id as usize)
+            .map(|p| p.is_some())
+            .unwrap_or(false);
+
+        println!("  packet {} present={}", id, present);
     }
+
+    ids.iter()
+        .filter_map(|&id| entry.packets.get(id as usize).and_then(|p| p.clone()))
+        .collect()
+}
 
     pub fn complete(&self, block_id: u32) {
         self.inner.lock().unwrap().remove(&block_id);
