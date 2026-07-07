@@ -1,6 +1,6 @@
 //BEST
 use anyhow::Result;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use rand::{rngs::OsRng, RngCore};
 use rsa::{
     pkcs8::DecodePublicKey,
@@ -207,6 +207,7 @@ impl Sender {
         let mut opened_blocks: HashSet<u32> = HashSet::new();
         let mut sent_counts: HashMap<u32, usize> = HashMap::new();
         let mut next_print: u64 = 500 * 1024 * 1024;
+        let mut last_status_print = Instant::now();
 
         println!("Block sender thread started");
 
@@ -234,6 +235,7 @@ impl Sender {
                 permits_rx.recv()?;
                 opened_blocks.insert(block_id);
                 sent_counts.insert(block_id, 0);
+                println!("[DEBUG] Block {block_id} opened ({block_total} packets)");
             }
 
             udp_send(&udp, &chunk.packet);
@@ -250,6 +252,17 @@ impl Sender {
             if *count == block_total {
                 let end = BlockEndPacket::encode(block_id, block_total as u32);
                 udp_send(&udp, &end);
+                println!("[DEBUG] Block {block_id} fully sent, BlockEnd emitted");
+            }
+
+            if last_status_print.elapsed() > Duration::from_secs(1) {
+                println!(
+                    "[DEBUG] sender: packets_sent={} sent={:.2}MB blocks_open={}",
+                    packets_sent,
+                    bytes_sent as f64 / (1024.0 * 1024.0),
+                    opened_blocks.len()
+                );
+                last_status_print = Instant::now();
             }
 
             if bytes_sent >= next_print {
@@ -289,6 +302,7 @@ impl Sender {
         let mut completed = 0u32;
         let mut retransmitted = 0u64;
         let start = Instant::now();
+        let mut last_missing_print = Instant::now();
 
         println!("Control-ack loop started, awaiting {} block(s)", total_blocks);
 
@@ -298,17 +312,32 @@ impl Sender {
             match ack {
                 BlockAck::Missing { block_id, missing } => {
                     let packets = cache.fetch_for_retransmit(block_id, &missing);
+                    let mut sent_this_round = 0u64;
                     for packet in &packets {
                         if let Err(e) = udp.send(packet) {
                             eprintln!("udp resend failed (non-fatal, will retry): {e}");
                         } else {
                             retransmitted += 1;
+                            sent_this_round += 1;
                         }
+                    }
+                    // Throttled so a block stuck in repeated repair rounds
+                    // doesn't flood the console - one line per second is
+                    // enough to confirm it's actively retrying.
+                    if last_missing_print.elapsed() > Duration::from_secs(1) {
+                        println!(
+                            "[DEBUG] block {block_id}: {} missing, resent {sent_this_round} packet(s)",
+                            missing.len()
+                        );
+                        last_missing_print = Instant::now();
                     }
                 }
                 BlockAck::Complete { block_id } => {
                     cache.complete(block_id);
                     completed += 1;
+                    println!(
+                        "[DEBUG] block {block_id} complete ({completed}/{total_blocks} blocks done)"
+                    );
                     // Return a slot to the pipeline. If the sender loop has
                     // already finished and dropped its receiver (shouldn't
                     // happen before this loop exits, but stay defensive),

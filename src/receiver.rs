@@ -68,6 +68,7 @@ fn receiver_thread(
     let mut packets = 0u64;
     let mut block_ends = 0u64;
     let mut malformed = 0u64;
+    let mut last_status_print = Instant::now();
 
     while running.load(Ordering::Acquire) {
         let t = Instant::now();
@@ -117,6 +118,14 @@ fn receiver_thread(
                     _ => {
                         malformed += 1;
                     }
+                }
+
+                if last_status_print.elapsed() > Duration::from_secs(1) {
+                    println!(
+                        "[DEBUG] receiver: packets={} block_ends={} malformed={}",
+                        packets, block_ends, malformed
+                    );
+                    last_status_print = Instant::now();
                 }
             }
             Err(ref e) if e.kind() == ErrorKind::TimedOut || e.kind() == ErrorKind::WouldBlock => {
@@ -214,6 +223,7 @@ fn writer_thread(
     let mut next_chunk = 0u32;
     let mut pending: HashMap<u32, Vec<u8>> = HashMap::new();
     let mut next_print = 500 * 1024 * 1024;
+    let mut last_status_print = Instant::now();
 
     let io_start = Instant::now();
 
@@ -234,6 +244,14 @@ fn writer_thread(
                 );
                 next_print += 500 * 1024 * 1024;
             }
+        }
+
+        if last_status_print.elapsed() > Duration::from_secs(1) {
+            println!(
+                "[DEBUG] writer: chunks_written={chunks_written}/{expected_chunks} next_chunk={next_chunk} pending_buffer={}",
+                pending.len()
+            );
+            last_status_print = Instant::now();
         }
 
         if next_chunk >= expected_chunks {
@@ -287,6 +305,7 @@ fn ack_manager_loop(
 
     let mut completed = 0u32;
     let start = Instant::now();
+    let mut last_progress_print = Instant::now();
 
     println!("Ack manager started, awaiting {} block(s)", total_blocks_count);
 
@@ -307,6 +326,9 @@ fn ack_manager_loop(
                 BlockAck::Complete { block_id }.write_to(&mut control)?;
                 state.remove(block_id);
                 completed += 1;
+                println!(
+                    "[DEBUG] block {block_id} confirmed complete ({completed}/{total_blocks_count} done)"
+                );
             } else if rounds > MAX_BLOCK_RETRY_ROUNDS {
                 println!(
                     "WARNING: block {} still incomplete after {} rounds ({} packet(s) missing) -- giving up on it to avoid stalling the transfer.",
@@ -318,6 +340,13 @@ fn ack_manager_loop(
             } else {
                 BlockAck::Missing { block_id, missing }.write_to(&mut control)?;
             }
+        }
+
+        if last_progress_print.elapsed() > Duration::from_secs(1) {
+            println!(
+                "[DEBUG] ack manager: {completed}/{total_blocks_count} blocks confirmed complete so far"
+            );
+            last_progress_print = Instant::now();
         }
     }
 
