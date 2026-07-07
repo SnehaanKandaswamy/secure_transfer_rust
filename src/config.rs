@@ -39,7 +39,7 @@ pub const NUM_SENDER_STREAMS: usize = 1;
 // (a lossy block costs at most PACKETS_PER_BLOCK ids in one TCP message)
 // but large enough to amortize the per-block BlockEnd/BlockAck round trip
 // over plenty of data. 256 packets * ~1400 bytes ~= 350 KB per block.
-pub const PACKETS_PER_BLOCK: usize = 32;
+pub const PACKETS_PER_BLOCK: usize = 64;
 
 // Maximum number of blocks the sender keeps "open" (packets sent, not yet
 // confirmed complete) at once. This is the only flow-control knob in the
