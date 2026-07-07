@@ -29,7 +29,7 @@ pub const RETRANSMIT_BATCH_SIZE: usize = 4096;
 // initial burst in parallel. Each pulls encrypted chunks off the same
 // queue and sends on its own socket. Try 2-4; more isn't necessarily
 // better if the link itself is the bottleneck rather than the sender.
-pub const NUM_SENDER_STREAMS: usize = 1;
+pub const NUM_SENDER_STREAMS: usize = 2;
 
 // ---------------------------------------------------------------------
 // Block-pipelined transport (see transport.rs)
@@ -48,7 +48,7 @@ pub const PACKETS_PER_BLOCK: usize = 256;
 // keep arriving. 3-4 is the sweet spot the design calls for -- enough to
 // keep the network saturated across the RTTs seen on Wi-Fi, without
 // unbounded cache growth if repairs lag behind.
-pub const PIPELINE_DEPTH: usize = 8;
+pub const PIPELINE_DEPTH: usize = 4;
 
 // After a BlockEnd (or, on the receiver side, after a quiet period with no
 // new packets for the active block), wait this long before checking for
