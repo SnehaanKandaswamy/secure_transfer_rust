@@ -136,23 +136,25 @@ if decode_time > Duration::from_micros(200) {
 
         let chunk_id = chunk_id_of(pkt.block_id, pkt.packet_in_block);
 
-        let t = Instant::now();
-        tx.send(ReceivedPacket {
-            chunk_id,
-            block_id: pkt.block_id,
-            packet_in_block: pkt.packet_in_block,
-            encrypted: pkt.payload,
-            hash: pkt.hash,
-        })?;
-        let waited = t.elapsed();
+let t = Instant::now();
 
-        if waited > Duration::from_millis(2) {
-            println!(
-                "[BACKPRESSURE] packet channel blocked {:?}",
-                waited
-            );
-        }
+tx.send(ReceivedPacket {
+    chunk_id,
+    block_id: pkt.block_id,
+    packet_in_block: pkt.packet_in_block,
+    encrypted: pkt.payload,
+    hash: pkt.hash,
+    queued_at: Instant::now(),
+})?;
 
+let waited = t.elapsed();
+
+if waited > Duration::from_millis(2) {
+    println!(
+        "[BACKPRESSURE] packet channel blocked {:?}",
+        waited
+    );
+}
         // END timing
         let processing_time = processing_start.elapsed();
 
@@ -221,29 +223,41 @@ fn worker_thread(
     state: SharedReceiverState,
     expected_chunks: u32,
 ) -> Result<()> {
-    while let Ok(packet) = rx.recv() {
-        let decrypted = crate::crypto::decrypt_chunk(
-            &packet.encrypted,
-            &session_key,
-            &nonce,
-            packet.chunk_id,
+   while let Ok(packet) = rx.recv() {
+
+    let queue_delay = packet.queued_at.elapsed();
+
+    if queue_delay > Duration::from_millis(10) {
+        println!(
+            "[WORKER QUEUE] block {} packet {} waited {:?}",
+            packet.block_id,
+            packet.packet_in_block,
+            queue_delay,
         );
+    }
 
-        let hash = crate::checksum::chunk_hash(&decrypted);
+    let decrypted = crate::crypto::decrypt_chunk(
+        &packet.encrypted,
+        &session_key,
+        &nonce,
+        packet.chunk_id,
+    );
 
-        if hash != packet.hash {
-            // Corrupt packet: never marked verified, so it will show up as
-            // missing and get retransmitted like any lost packet.
-            continue;
-        }
+    let hash = crate::checksum::chunk_hash(&decrypted);
 
-        let total = packets_in_block(packet.block_id, expected_chunks);
-        state.mark_verified(packet.block_id, packet.packet_in_block, total);
-        let t = Instant::now();
-        tx.send(DecryptedChunk {
-            chunk_id: packet.chunk_id,
-            data: decrypted,
-        })?;
+    if hash != packet.hash {
+        continue;
+    }
+
+    let total = packets_in_block(packet.block_id, expected_chunks);
+    state.mark_verified(packet.block_id, packet.packet_in_block, total);
+
+    let t = Instant::now();
+
+    tx.send(DecryptedChunk {
+        chunk_id: packet.chunk_id,
+        data: decrypted,
+    })?;
         
 let waited = t.elapsed();
 

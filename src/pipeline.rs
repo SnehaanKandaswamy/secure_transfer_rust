@@ -1,4 +1,5 @@
 //BEST
+use std::time::Instant;
 pub const NUM_WORKERS: usize = 4;
 pub struct ReadChunk {
     pub chunk_id: u32,
@@ -23,6 +24,7 @@ pub struct ReceivedPacket {
     pub packet_in_block: u16,
     pub encrypted: Vec<u8>,
     pub hash: u64,
+    pub queued_at: Instant,
 }
 
 pub struct DecryptedChunk {
