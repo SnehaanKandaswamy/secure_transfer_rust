@@ -255,7 +255,14 @@ fn ack_manager_loop(
             let Some((is_complete, missing, rounds)) = state.snapshot_and_tick(block_id) else {
                 continue;
             };
-
+            if !is_complete {
+                println!(
+                    "[CHECK] block={} missing={} rounds={}",
+                    block_id,
+                    missing.len(),
+                    rounds
+                );
+            }
             if is_complete {
                 println!("[ACK] Block {} complete", block_id);
                 BlockAck::Complete { block_id }.write_to(&mut control)?;

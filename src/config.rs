@@ -9,7 +9,7 @@ pub const CHUNK_SIZE: usize = 1400;
 
 pub const NUM_WORKERS: usize = 4;
 
-pub const UDP_SEND_BUFFER: usize = 16 * 1024 * 1024;
+pub const UDP_SEND_BUFFER: usize = 32 * 1024 * 1024;
 
 pub const UDP_RECV_BUFFER: usize = 32 * 1024 * 1024;
 
