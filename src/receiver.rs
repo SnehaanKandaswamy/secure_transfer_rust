@@ -352,10 +352,16 @@ fn ack_manager_loop(
     let mut completed = 0u32;
     let start = Instant::now();
     let mut last_progress_print = Instant::now();
-
+    
     println!("Ack manager started, awaiting {} block(s)", total_blocks_count);
 
     while completed < total_blocks_count {
+        println!(
+    "completed={} total={} tracked={}",
+    completed,
+    total_blocks_count,
+    state.inner.lock().unwrap().len(),
+);
         println!("ACK thread alive");
         let ready = state.ready_for_check(grace, idle_timeout);
         println!("Ready blocks: {:?}", ready);
