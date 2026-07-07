@@ -90,6 +90,24 @@ fn receiver_thread(
         }
 
         let tag = buffer[0];
+        static mut LAST_PACKET: Option<Instant> = None;
+
+let now = Instant::now();
+
+unsafe {
+    if let Some(prev) = LAST_PACKET {
+        let gap = now.duration_since(prev);
+
+        if gap > Duration::from_millis(5) {
+            println!(
+                "[UDP DELIVERY GAP] {:?}",
+                gap
+            );
+        }
+    }
+
+    LAST_PACKET = Some(now);
+}
 let body = &buffer[1..size];
 
 match tag {
