@@ -217,6 +217,11 @@ impl SharedReceiverState {
             completed_blocks: Arc::new(Mutex::new(std::collections::HashSet::new())),
         }
     }
+    pub fn debug_counts(&self) -> (usize, usize) {
+    let tracked = self.inner.lock().unwrap().len();
+    let completed = self.completed_blocks.lock().unwrap().len();
+    (tracked, completed)
+}
 
     fn is_completed(&self, block_id: u32) -> bool {
         self.completed_blocks.lock().unwrap().contains(&block_id)
@@ -362,9 +367,11 @@ impl SharedReceiverState {
     /// extra retransmit copy still in flight when the block finished) are
     /// recognized and ignored instead of recreating a fresh entry.
     pub fn remove(&self, block_id: u32) {
-        self.inner.lock().unwrap().remove(&block_id);
-        self.completed_blocks.lock().unwrap().insert(block_id);
-    }
+    println!("[REMOVE] block {}", block_id);
+
+    self.inner.lock().unwrap().remove(&block_id);
+    self.completed_blocks.lock().unwrap().insert(block_id);
+}
 }
 
 impl Default for SharedReceiverState {

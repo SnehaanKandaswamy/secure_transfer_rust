@@ -356,11 +356,14 @@ fn ack_manager_loop(
     println!("Ack manager started, awaiting {} block(s)", total_blocks_count);
 
     while completed < total_blocks_count {
-        println!(
-    "completed={} total={} tracked={}",
+       let (tracked, completed_set) = state.debug_counts();
+
+println!(
+    "[ACK STATE] completed={} total={} tracked={} completed_set={}",
     completed,
     total_blocks_count,
-    state.inner.lock().unwrap().len(),
+    tracked,
+    completed_set,
 );
         println!("ACK thread alive");
         let ready = state.ready_for_check(grace, idle_timeout);
