@@ -40,6 +40,7 @@ use crate::config::{
     PIPELINE_DEPTH,
     BLOCK_GRACE_PERIOD_MS,
     BLOCK_IDLE_TIMEOUT_MS,
+    UDP_RECV_BUFFER,
     MAX_BLOCK_RETRY_ROUNDS,
 };
 use crate::protocol::{DataPacket, BlockEndPacket, BlockAck, TAG_DATA, TAG_BLOCK_END};
