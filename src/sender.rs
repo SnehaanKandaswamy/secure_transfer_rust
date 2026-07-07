@@ -727,6 +727,11 @@ impl Sender {
                         block_id,
                         missing.len()
                     );
+                    println!(
+    "[REPAIR IDS] block {} missing {:?}",
+    block_id,
+    missing
+);
                     // Read-only snapshot of exactly the cached packets we'd
                     // resend, taken and released before any further access
                     // to `block_states` (and before any I/O), so there's no
