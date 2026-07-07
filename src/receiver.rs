@@ -183,11 +183,6 @@ fn worker_thread(
 
         let total = packets_in_block(packet.block_id, expected_chunks);
         state.mark_verified(packet.block_id, packet.packet_in_block, total);
-        println!(
-    "Verified block {} packet {}",
-    packet.block_id,
-    packet.packet_in_block
-);
 
         tx.send(DecryptedChunk {
             chunk_id: packet.chunk_id,

@@ -1,4 +1,34 @@
 //BEST
+//
+// ======================================================================
+// PROGRESS LOG
+// ======================================================================
+// ✔ ACK deadlock (ready_for_check ignoring completed blocks) -- fixed.
+// ✔ Shared retransmission cache -- working.
+// ✔ Blocks progress end-to-end -- working.
+// ✔ Complete ACKs received correctly -- working.
+// ✔ RACE: receiver requesting retransmission for packets the sender
+//   hadn't cached yet ("packet 255 present=false ... later cached") --
+//   FIXED below in `block_sender_loop`.
+//
+//   Root cause: the send-loop called `udp_send()` BEFORE
+//   `cache.record_sent()`. UDP delivery (esp. on a fast/local link) could
+//   outrace the mutex-lock + insert, so the receiver could verify a
+//   packet and flag a *neighboring* one "missing" before that neighbor
+//   had actually made it into the cache. `fetch_for_retransmit()` would
+//   then find nothing to resend for a packet that genuinely had been
+//   sent, stalling that block's repair for a round trip (or more).
+//
+//   Fix: swapped the order so `cache.record_sent()` always completes
+//   before the packet is handed to the socket. See the comment at the
+//   call site in `block_sender_loop` for the full reasoning, and
+//   `transport.rs::fetch_for_retransmit` for the resulting invariant.
+//   No reorder buffer, sliding window, or state-machine redesign was
+//   needed -- this was purely an instruction-ordering bug.
+//
+//   Status: FIXED, not yet load-tested by me -- please re-run your lossy
+//   Wi-Fi test and confirm the "resent 0 packets" log line disappears.
+// ======================================================================
 use anyhow::Result;
 use std::time::{Duration, Instant};
 use rand::{rngs::OsRng, RngCore};
@@ -238,18 +268,18 @@ impl Sender {
                 println!("[DEBUG] Block {block_id} opened ({block_total} packets)");
             }
 
-          udp_send(&udp, &chunk.packet);
-            packets_sent += 1;
-            bytes_sent += chunk.bytes as u64;
-
-            if packet_in_block >= 250 {
-                println!(
-                    "[CACHE] About to cache block {} packet {}",
-                    block_id,
-                    packet_in_block
-                );
-            }
-
+            // CORRECTNESS-CRITICAL ORDERING: the packet must be recorded in
+            // the retransmission cache *before* it is ever put on the wire.
+            // Sending first (as the old code did) opens a window where the
+            // datagram can reach the receiver, get decrypted/verified, and
+            // trigger a "missing packet" repair check for a neighboring
+            // packet before record_sent() has actually run -- at which
+            // point fetch_for_retransmit() finds nothing to resend for a
+            // packet that was, in fact, already sent. Caching first closes
+            // that window entirely: by the time a packet can possibly be
+            // observed by the receiver, it is unconditionally already in
+            // the cache.
+            let to_send = chunk.packet.clone();
             cache.record_sent(
                 block_id,
                 packet_in_block,
@@ -257,13 +287,9 @@ impl Sender {
                 chunk.packet,
             );
 
-            if packet_in_block >= 250 {
-                println!(
-                    "[CACHE] Cached block {} packet {}",
-                    block_id,
-                    packet_in_block
-                );
-            }
+            udp_send(&udp, &to_send);
+            packets_sent += 1;
+            bytes_sent += chunk.bytes as u64;
 
             let count = sent_counts.get_mut(&block_id).unwrap();
             *count += 1;

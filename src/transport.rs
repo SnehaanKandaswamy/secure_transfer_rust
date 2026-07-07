@@ -15,6 +15,13 @@
 //! This module holds both halves of that bookkeeping:
 //! `SharedBlockCache` (sender: cached datagrams for retransmit) and
 //! `SharedReceiverState` (receiver: per-block received bitmap + timers).
+//!
+//! PROGRESS: `SharedBlockCache` previously had a real race -- see the
+//! comment on `fetch_for_retransmit` below and the matching one in
+//! `sender.rs::block_sender_loop`. Fixed by reordering the sender loop to
+//! cache a packet before sending it; nothing in this file changed to fix
+//! it (this file's cache/lookup logic was always correct), only debug
+//! `println!`s that had been added while chasing the bug were removed.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -63,44 +70,26 @@ impl SharedBlockCache {
             .entry(block_id)
             .or_insert_with(|| BlockCacheEntry::new(total));
         entry.packets[packet_in_block as usize] = Some(datagram);
-        if packet_in_block >= 254 {
-    println!(
-        "[STORE] block={} packet={} now_is_some={}",
-        block_id,
-        packet_in_block,
-        entry.packets[packet_in_block as usize].is_some()
-    );
-}
-    }
-pub fn fetch_for_retransmit(&self, block_id: u32, ids: &[u16]) -> Vec<Vec<u8>> {
-    let guard = self.inner.lock().unwrap();
-
-    let Some(entry) = guard.get(&block_id) else {
-        println!("No cache entry for block {}", block_id);
-        return Vec::new();
-    };
-
-    println!(
-        "Retransmit request: block={} cache_size={} missing={:?}",
-        block_id,
-        entry.packets.len(),
-        ids
-    );
-
-    for &id in ids {
-        let present = entry
-            .packets
-            .get(id as usize)
-            .map(|p| p.is_some())
-            .unwrap_or(false);
-
-        println!("  packet {} present={}", id, present);
     }
 
-    ids.iter()
-        .filter_map(|&id| entry.packets.get(id as usize).and_then(|p| p.clone()))
-        .collect()
-}
+    /// Serves a retransmission request for specific packet ids within a
+    /// block. Because the sender loop now calls `record_sent` for a
+    /// packet and waits for it to return *before* that packet is ever
+    /// handed to the socket, any id the receiver could possibly have
+    /// learned about as "missing" is guaranteed to already be present here
+    /// -- there is no longer a window where a just-sent packet hasn't been
+    /// cached yet.
+    pub fn fetch_for_retransmit(&self, block_id: u32, ids: &[u16]) -> Vec<Vec<u8>> {
+        let guard = self.inner.lock().unwrap();
+
+        let Some(entry) = guard.get(&block_id) else {
+            return Vec::new();
+        };
+
+        ids.iter()
+            .filter_map(|&id| entry.packets.get(id as usize).and_then(|p| p.clone()))
+            .collect()
+    }
 
     pub fn complete(&self, block_id: u32) {
         self.inner.lock().unwrap().remove(&block_id);
@@ -289,46 +278,33 @@ impl SharedReceiverState {
     /// genuinely needs more than one round trip to repair gets re-checked
     /// at the exact same short interval every time, re-requesting packets
     /// whose previous retransmit hasn't had a chance to land yet.
-   pub fn ready_for_check(&self, grace: Duration, idle_timeout: Duration) -> Vec<u32> {
-    let guard = self.inner.lock().unwrap();
-    let now = Instant::now();
+    pub fn ready_for_check(&self, grace: Duration, idle_timeout: Duration) -> Vec<u32> {
+        let guard = self.inner.lock().unwrap();
+        let now = Instant::now();
 
-    // DEBUG
-    for (&id, e) in guard.iter() {
-        println!(
-            "Block {}: complete={} end_seen={} received={}/{} rounds={}",
-            id,
-            e.is_complete(),
-            e.end_seen,
-            e.received_count,
-            e.total,
-            e.rounds,
-        );
+        guard
+            .iter()
+            .filter(|(_, e)| {
+                if e.end_seen && e.is_complete() {
+                    return true;
+                }
+
+                if e.is_complete() {
+                    return false;
+                }
+
+                let elapsed = now.duration_since(e.last_activity);
+
+                if e.end_seen {
+                    let required = grace.saturating_mul(e.rounds + 1).min(idle_timeout);
+                    elapsed >= required
+                } else {
+                    elapsed >= idle_timeout
+                }
+            })
+            .map(|(&id, _)| id)
+            .collect()
     }
-
-   guard
-    .iter()
-    .filter(|(_, e)| {
-        if e.end_seen && e.is_complete() {
-            return true;
-        }
-
-        if e.is_complete() {
-            return false;
-        }
-
-        let elapsed = now.duration_since(e.last_activity);
-
-        if e.end_seen {
-            let required = grace.saturating_mul(e.rounds + 1).min(idle_timeout);
-            elapsed >= required
-        } else {
-            elapsed >= idle_timeout
-        }
-    })
-    .map(|(&id, _)| id)
-    .collect()
-}
     /// Snapshots a block's state for building an ack, and bumps its retry
     /// round counter (checked against MAX_BLOCK_RETRY_ROUNDS by the caller).
     /// Returns `(is_complete, missing_ids, rounds_so_far)`.
