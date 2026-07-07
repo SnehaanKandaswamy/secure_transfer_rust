@@ -99,13 +99,24 @@ fn receiver_thread(
 
                         let chunk_id = chunk_id_of(pkt.block_id, pkt.packet_in_block);
 
-                        tx.send(ReceivedPacket {
-                            chunk_id,
-                            block_id: pkt.block_id,
-                            packet_in_block: pkt.packet_in_block,
-                            encrypted: pkt.payload,
-                            hash: pkt.hash,
-                        })?;
+                        let send_start = Instant::now();
+
+tx.send(ReceivedPacket {
+    chunk_id,
+    block_id: pkt.block_id,
+    packet_in_block: pkt.packet_in_block,
+    encrypted: pkt.payload,
+    hash: pkt.hash,
+})?;
+
+let stall = send_start.elapsed();
+
+if stall > Duration::from_millis(1) {
+    println!(
+        "[STALL] packet_tx blocked for {:?}",
+        stall
+    );
+}
                     }
                     TAG_BLOCK_END => {
                         let Some((block_id, total_packets)) = BlockEndPacket::decode(body) else {
