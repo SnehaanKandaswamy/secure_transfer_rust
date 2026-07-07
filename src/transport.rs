@@ -63,6 +63,14 @@ impl SharedBlockCache {
             .entry(block_id)
             .or_insert_with(|| BlockCacheEntry::new(total));
         entry.packets[packet_in_block as usize] = Some(datagram);
+        if packet_in_block >= 254 {
+    println!(
+        "[STORE] block={} packet={} now_is_some={}",
+        block_id,
+        packet_in_block,
+        entry.packets[packet_in_block as usize].is_some()
+    );
+}
     }
 pub fn fetch_for_retransmit(&self, block_id: u32, ids: &[u16]) -> Vec<Vec<u8>> {
     let guard = self.inner.lock().unwrap();
