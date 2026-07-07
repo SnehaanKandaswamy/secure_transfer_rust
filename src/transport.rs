@@ -177,7 +177,8 @@ pub struct BlockRxEntry {
     pub total: usize,
     received: Vec<bool>,
     received_count: usize,
-    last_activity: Instant,
+    last_packet_time: Instant,
+    last_repair_request: Option<Instant>,
     end_seen: bool,
     rounds: u32,
 }
@@ -188,7 +189,8 @@ impl BlockRxEntry {
             total,
             received: vec![false; total],
             received_count: 0,
-            last_activity: Instant::now(),
+            last_packet_time: Instant::now(),
+            last_repair_request: None,
             end_seen: false,
             rounds: 0,
         }
@@ -252,7 +254,7 @@ impl SharedReceiverState {
         let entry = guard
             .entry(block_id)
             .or_insert_with(|| BlockRxEntry::new(total));
-        entry.last_activity = Instant::now();
+        entry.last_packet_time = Instant::now();
     }
 
     /// Called by a decryption worker once a packet has been decrypted and
@@ -283,7 +285,7 @@ impl SharedReceiverState {
             .entry(block_id)
             .or_insert_with(|| BlockRxEntry::new(total));
         entry.end_seen = true;
-        entry.last_activity = Instant::now();
+        entry.last_packet_time = Instant::now();
     }
 
     /// Returns block ids ready to be checked right now: either BlockEnd was
@@ -312,13 +314,21 @@ impl SharedReceiverState {
                     return false;
                 }
 
-                let elapsed = now.duration_since(e.last_activity);
+                let packet_elapsed = now.duration_since(e.last_packet_time);
 
+                let repair_elapsed = match e.last_repair_request {
+                    Some(t) => now.duration_since(t),
+                    None => idle_timeout,
+                };
+                    
                 if e.end_seen {
-                    let required = grace.saturating_mul(e.rounds + 1).min(idle_timeout);
-                    elapsed >= required
+                    let required = grace
+                        .saturating_mul(e.rounds + 1)
+                        .min(idle_timeout);
+
+                    packet_elapsed >= required && repair_elapsed >= required
                 } else {
-                    elapsed >= idle_timeout
+                    packet_elapsed >= idle_timeout
                 }
             })
             .map(|(&id, _)| id)
@@ -331,7 +341,7 @@ impl SharedReceiverState {
         let mut guard = self.inner.lock().unwrap();
         let entry = guard.get_mut(&block_id)?;
         entry.rounds += 1;
-        entry.last_activity = Instant::now();
+        entry.last_repair_request = Some(Instant::now());
         Some((entry.is_complete(), entry.missing_ids(), entry.rounds))
     }
 
