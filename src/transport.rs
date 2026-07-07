@@ -251,7 +251,7 @@ impl SharedReceiverState {
         if idx < entry.received.len() && !entry.received[idx] {
             entry.received[idx] = true;
             entry.received_count += 1;
-            if block_id == 25 {
+            if block_id == 0 {
     println!(
         "[VERIFY] block {} received packet {} ({}/{})",
         block_id,
@@ -274,6 +274,11 @@ impl SharedReceiverState {
             .or_insert_with(|| BlockRxEntry::new(total));
         entry.end_seen = true;
         entry.last_activity = Instant::now();
+        println!(
+    "[END] block {} total {}",
+    block_id,
+    total
+);  
     }
 
     /// Returns block ids ready to be checked right now: either BlockEnd was
