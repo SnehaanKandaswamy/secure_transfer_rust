@@ -207,9 +207,23 @@ fn place_chunk(
 
     // Cache-before-send ordering, unchanged from the earlier fix.
     entry.packets[packet_in_block as usize] = Some(chunk.packet.clone());
-    if let Err(e) = udp.send(&chunk.packet) {
-        eprintln!("udp send failed (non-fatal, will retry): {e}");
+
+let t = Instant::now();
+
+if let Err(e) = udp.send(&chunk.packet) {
+    eprintln!("udp send failed (non-fatal, will retry): {e}");
+} else {
+    let waited = t.elapsed();
+
+    if waited > Duration::from_millis(2) {
+        println!(
+            "[SEND BLOCKED - INITIAL] packet {} block {} {:?}",
+            packet_in_block,
+            block_id,
+            waited
+        );
     }
+}
 
     *packets_sent += 1;
     *bytes_sent += chunk.bytes as u64;
@@ -223,9 +237,22 @@ fn place_chunk(
             entry.total
         );
         let end = BlockEndPacket::encode(block_id, entry.total as u32);
-        if let Err(e) = udp.send(&end) {
-            eprintln!("udp send failed (non-fatal, will retry): {e}");
-        }
+
+let t = Instant::now();
+
+if let Err(e) = udp.send(&end) {
+    eprintln!("udp send failed (non-fatal, will retry): {e}");
+} else {
+    let waited = t.elapsed();
+
+    if waited > Duration::from_millis(2) {
+        println!(
+            "[SEND BLOCKED - BLOCKEND] block {} {:?}",
+            block_id,
+            waited
+        );
+    }
+}
         entry.end_emitted = true;
         println!("[DEBUG] Block {block_id} fully sent, BlockEnd emitted");
     }
@@ -757,13 +784,21 @@ impl Sender {
     block_id
 );
                         for packet in &packets {
-                            if let Err(e) = udp.send(packet) {
-                                eprintln!("udp resend failed (non-fatal, will retry): {e}");
-                            } else {
-                                retransmitted += 1;
-                                sent_this_round += 1;
-                            }
-                        }
+    let t = Instant::now();
+
+    if let Err(e) = udp.send(packet) {
+        eprintln!("udp resend failed (non-fatal, will retry): {e}");
+    } else {
+        let waited = t.elapsed();
+
+        if waited > Duration::from_millis(2) {
+            println!("[SEND BLOCKED - RETRANSMIT] {:?}", waited);
+        }
+
+        retransmitted += 1;
+        sent_this_round += 1;
+    }
+}
                         if last_missing_print.elapsed() > Duration::from_secs(1) {
                             println!(
                                 "[DEBUG] block {block_id}: {} missing, resent {sent_this_round} packet(s)",
