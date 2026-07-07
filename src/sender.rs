@@ -208,22 +208,9 @@ fn place_chunk(
     // Cache-before-send ordering, unchanged from the earlier fix.
     entry.packets[packet_in_block as usize] = Some(chunk.packet.clone());
 
-let t = Instant::now();
-
-if let Err(e) = udp.send(&chunk.packet) {
-    eprintln!("udp send failed (non-fatal, will retry): {e}");
-} else {
-    let waited = t.elapsed();
-
-    if waited > Duration::from_millis(2) {
-        println!(
-            "[SEND BLOCKED - INITIAL] packet {} block {} {:?}",
-            packet_in_block,
-            block_id,
-            waited
-        );
+    if let Err(e) = udp.send(&chunk.packet) {
+        eprintln!("udp send failed (non-fatal, will retry): {e}");
     }
-}
 
     *packets_sent += 1;
     *bytes_sent += chunk.bytes as u64;
@@ -238,23 +225,10 @@ if let Err(e) = udp.send(&chunk.packet) {
         );
         let end = BlockEndPacket::encode(block_id, entry.total as u32);
 
-let t = Instant::now();
-
-if let Err(e) = udp.send(&end) {
-    eprintln!("udp send failed (non-fatal, will retry): {e}");
-} else {
-    let waited = t.elapsed();
-
-    if waited > Duration::from_millis(2) {
-        println!(
-            "[SEND BLOCKED - BLOCKEND] block {} {:?}",
-            block_id,
-            waited
-        );
-    }
-}
+        if let Err(e) = udp.send(&end) {
+            eprintln!("udp send failed (non-fatal, will retry): {e}");
+        }
         entry.end_emitted = true;
-        println!("[DEBUG] Block {block_id} fully sent, BlockEnd emitted");
     }
 
     if *bytes_sent >= *next_print {
@@ -309,10 +283,6 @@ fn admit_or_buffer(
             // disposed of one way or another (real completion or a
             // force-complete give-up). Dropped here -- never buffered,
             // never used to reopen -- because its slot is `Resolved`.
-            println!(
-                "[WARN] dropping stale chunk for already-resolved block {block_id} \
-                 (packet {packet_in_block}) -- receiver has already moved past it"
-            );
         }
         Action::PlaceIntoOpen => {
             place_chunk(
@@ -330,7 +300,6 @@ fn admit_or_buffer(
         }
         Action::OpenAndPlace => {
             let total = packets_in_block(block_id, total_chunks);
-            println!("[DEBUG] Block {block_id} opened ({total} packets)");
             block_states.insert(block_id, BlockSlot::Open(BlockState::new(total)));
             *open_slots += 1;
             place_chunk(
@@ -383,10 +352,6 @@ fn drain_pending(
         };
 
         let total = packets_in_block(next_id, total_chunks);
-        println!(
-            "[DEBUG] Block {next_id} opened ({total} packets, {} already buffered)",
-            bucket.len()
-        );
         block_states.insert(next_id, BlockSlot::Open(BlockState::new(total)));
         *open_slots += 1;
 
@@ -460,15 +425,12 @@ impl Sender {
         use std::io::Read;
 
         let mut file = File::open(filename)?;
-        let reader_start = Instant::now();
-        let mut total_bytes = 0u64;
         let mut chunk_id = 0u32;
 
         loop {
             let mut buffer = vec![0u8; CHUNK_SIZE];
 
             let bytes = file.read(&mut buffer)?;
-            total_bytes += bytes as u64;
 
             if bytes == 0 {
                 break;
@@ -485,11 +447,6 @@ impl Sender {
 
             chunk_id += 1;
         }
-        println!(
-            "Reader finished: {:.3?} ({:.2} MB)",
-            reader_start.elapsed(),
-            total_bytes as f64 / 1024.0 / 1024.0
-        );
         Ok(())
     }
 
@@ -506,22 +463,13 @@ impl Sender {
         key: [u8; 32],
         nonce: [u8; 16],
     ) -> Result<()> {
-        let worker_start = Instant::now();
-        let mut encrypt_time = std::time::Duration::ZERO;
-        let mut chunks = 0u64;
-
         while let Ok(chunk) = rx.recv() {
-            let t = Instant::now();
-
             let encrypted = crypto::encrypt_chunk(
                 &chunk.data,
                 &key,
                 &nonce,
                 chunk.chunk_id,
             );
-
-            encrypt_time += t.elapsed();
-            chunks += 1;
 
             let hash =
                 checksum::chunk_hash(&chunk.data);
@@ -543,18 +491,6 @@ impl Sender {
                 }
             )?;
         }
-        println!(
-            "Worker {:?}: {} chunks | encrypt {:?}",
-            std::thread::current().id(),
-            chunks,
-            encrypt_time
-        );
-
-        println!(
-            "Worker total lifetime: {:?}",
-            worker_start.elapsed()
-        );
-        println!("Worker finished");
         Ok(())
     }
 
@@ -658,7 +594,6 @@ impl Sender {
         let mut block_states: HashMap<u32, BlockSlot> = HashMap::new();
         let mut open_slots: usize = 0;
 
-        println!("Block manager thread started");
 
         loop {
             // Drain BEFORE waiting on the channel, not just reactively
@@ -749,16 +684,7 @@ impl Sender {
                     );
                 }
                 SenderEvent::Ack(BlockAck::Missing { block_id, missing }) => {
-                                        println!(
-                        "[SENDER] Repair request: block {} missing {} packets",
-                        block_id,
-                        missing.len()
-                    );
-                    println!(
-    "[REPAIR IDS] block {} missing {:?}",
-    block_id,
-    missing
-);
+                
                     // Read-only snapshot of exactly the cached packets we'd
                     // resend, taken and released before any further access
                     // to `block_states` (and before any I/O), so there's no
@@ -777,12 +703,7 @@ impl Sender {
                     };
 
                     if let Some(packets) = cached {
-                        let mut sent_this_round = 0u64;
-                        println!(
-    "[REPAIR] Resending {} packets for block {}",
-    packets.len(),
-    block_id
-);
+                       
                         for packet in &packets {
     let t = Instant::now();
 
@@ -796,14 +717,11 @@ impl Sender {
         }
 
         retransmitted += 1;
-        sent_this_round += 1;
+        
     }
 }
                         if last_missing_print.elapsed() > Duration::from_secs(1) {
-                            println!(
-                                "[DEBUG] block {block_id}: {} missing, resent {sent_this_round} packet(s)",
-                                missing.len()
-                            );
+                            
                             last_missing_print = Instant::now();
                         }
                     }
@@ -847,9 +765,7 @@ impl Sender {
     block_id,
     start.elapsed()
 );
-                            println!(
-                                "[DEBUG] block {block_id} complete ({completed}/{total_blocks} blocks done)"
-                            );
+                    
                         }
                         Prior::WasPending(n) => {
                             // The receiver resolved (very likely
@@ -869,9 +785,7 @@ impl Sender {
     block_id,
     start.elapsed()
 );
-                            println!(
-                                "[DEBUG] block {block_id} complete ({completed}/{total_blocks} blocks done)"
-                            );
+                          
                         }
                         Prior::Unseen => {
                             // Force-completed before the sender ever saw a
@@ -888,9 +802,7 @@ impl Sender {
     block_id,
     start.elapsed()
 );
-                            println!(
-                                "[DEBUG] block {block_id} complete ({completed}/{total_blocks} blocks done)"
-                            );
+                            
                         }
                     }
                 }

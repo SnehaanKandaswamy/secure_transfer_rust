@@ -45,7 +45,6 @@ use crate::config::{
 };
 use crate::protocol::{DataPacket, BlockEndPacket, BlockAck, TAG_DATA, TAG_BLOCK_END};
 use crate::transport::{SharedReceiverState, chunk_id_of, packets_in_block, total_blocks};
-const ACK_DEBUG: bool = false;
 // ------------------------------------------------------------------------
 // Raw UDP receiver thread. Demultiplexes incoming datagrams by their tag
 // byte into either data packets (forwarded to decryption workers) or
@@ -61,160 +60,56 @@ fn receiver_thread(
     running: Arc<AtomicBool>,
     expected_chunks: u32,
 ) -> Result<()> {
-    println!("Receiver thread started");
     use std::io::ErrorKind;
 
-    let thread_start = Instant::now();
     let mut buffer = vec![0u8; 70000];
-    let mut recv_time = Duration::ZERO;
-    let mut packets = 0u64;
-    let mut block_ends = 0u64;
-    let mut malformed = 0u64;
-    let mut last_status_print = Instant::now();
-    let mut last_packet = Instant::now();
-    use std::collections::HashMap;
 
-let mut recv_count: HashMap<u32, usize> = HashMap::new();
     while running.load(Ordering::Acquire) {
-        let t = Instant::now();
         match udp.recv_from(&mut buffer) {
-    Ok((size, _)) => {
-        recv_time += t.elapsed();
-
-        // ADD THIS
-        let gap = last_packet.elapsed();
-        if gap > Duration::from_micros(500) {
-            println!("[RECV GAP] {:?}", gap);
-        }
-        last_packet = Instant::now();
-
-        if size < 1 {
-            continue;
-        }
-
-        let tag = buffer[0];
-        static mut LAST_PACKET: Option<Instant> = None;
-
-let now = Instant::now();
-
-unsafe {
-    if let Some(prev) = LAST_PACKET {
-        let gap = now.duration_since(prev);
-
-        if gap > Duration::from_millis(5) {
-            println!(
-                "[UDP DELIVERY GAP] {:?}",
-                gap
-            );
-        }
-    }
-
-    LAST_PACKET = Some(now);
-}
-let body = &buffer[1..size];
-
-match tag {
-    TAG_DATA => {
-        packets += 1;
-
-        // START timing the entire receive-path work for this packet
-        let processing_start = Instant::now();
-
-        let decode_start = Instant::now();
-
-let Some(pkt) = DataPacket::decode(body) else {
-    malformed += 1;
-    continue;
-};
-*recv_count.entry(pkt.block_id).or_insert(0) += 1;
-
-let decode_time = decode_start.elapsed();
-
-if decode_time > Duration::from_micros(200) {
-    println!("[SLOW DECODE] {:?}", decode_time);
-}
-
-        let total = packets_in_block(pkt.block_id, expected_chunks);
-
-        state.touch_activity(pkt.block_id, total);
-
-        let chunk_id = chunk_id_of(pkt.block_id, pkt.packet_in_block);
-
-let t = Instant::now();
-
-tx.send(ReceivedPacket {
-    chunk_id,
-    block_id: pkt.block_id,
-    packet_in_block: pkt.packet_in_block,
-    encrypted: pkt.payload,
-    hash: pkt.hash,
-    queued_at: Instant::now(),
-})?;
-
-let waited = t.elapsed();
-
-if waited > Duration::from_millis(2) {
-    println!(
-        "[BACKPRESSURE] packet channel blocked {:?}",
-        waited
-    );
-}
-        // END timing
-        let processing_time = processing_start.elapsed();
-
-        if processing_time > Duration::from_micros(500) {
-            println!(
-                "[SLOW RECEIVE] packet processing took {:?}",
-                processing_time
-            );
-        }
-    }
-                    TAG_BLOCK_END => {
-    let Some((block_id, total_packets)) = BlockEndPacket::decode(body) else {
-        malformed += 1;
-        continue;
-    };
-
-    let count = recv_count.remove(&block_id).unwrap_or(0);
-
-    println!(
-        "[UDP RECEIVED] block {} -> {} packets",
-        block_id,
-        count
-    );
-
-    block_ends += 1;
-    state.mark_end_seen(block_id, total_packets as usize);
-}
-                    _ => {
-                        malformed += 1;
-                    }
+            Ok((size, _)) => {
+                if size < 1 {
+                    continue;
                 }
 
-                if last_status_print.elapsed() > Duration::from_secs(1) {
-                    println!(
-                        "[DEBUG] receiver: packets={} block_ends={} malformed={}",
-                        packets, block_ends, malformed
-                    );
-                    last_status_print = Instant::now();
+                let tag = buffer[0];
+                let body = &buffer[1..size];
+
+                match tag {
+                    TAG_DATA => {
+                        let Some(pkt) = DataPacket::decode(body) else {
+                            continue;
+                        };
+
+                        let total = packets_in_block(pkt.block_id, expected_chunks);
+
+                        state.touch_activity(pkt.block_id, total);
+
+                        let chunk_id = chunk_id_of(pkt.block_id, pkt.packet_in_block);
+
+                        tx.send(ReceivedPacket {
+                            chunk_id,
+                            block_id: pkt.block_id,
+                            packet_in_block: pkt.packet_in_block,
+                            encrypted: pkt.payload,
+                            hash: pkt.hash,
+                        })?;
+                    }
+                    TAG_BLOCK_END => {
+                        let Some((block_id, total_packets)) = BlockEndPacket::decode(body) else {
+                            continue;
+                        };
+
+                        state.mark_end_seen(block_id, total_packets as usize);
+                    }
+                    _ => {}
                 }
             }
             Err(ref e) if e.kind() == ErrorKind::TimedOut || e.kind() == ErrorKind::WouldBlock => {
-                recv_time += t.elapsed();
                 continue;
             }
             Err(e) => return Err(e.into()),
         }
     }
-
-    println!("==============================");
-    println!("Receiver UDP statistics");
-    println!("Data packets received : {}", packets);
-    println!("BlockEnd markers seen : {}", block_ends);
-    println!("Malformed datagrams   : {}", malformed);
-    println!("recv_from() time      : {:.3?}", recv_time);
-    println!("Thread lifetime       : {:.3?}", thread_start.elapsed());
-    println!("==============================");
 
     Ok(())
 }
@@ -237,18 +132,6 @@ fn worker_thread(
     expected_chunks: u32,
 ) -> Result<()> {
    while let Ok(packet) = rx.recv() {
-
-    let queue_delay = packet.queued_at.elapsed();
-
-    if queue_delay > Duration::from_millis(10) {
-        println!(
-            "[WORKER QUEUE] block {} packet {} waited {:?}",
-            packet.block_id,
-            packet.packet_in_block,
-            queue_delay,
-        );
-    }
-
     let decrypted = crate::crypto::decrypt_chunk(
         &packet.encrypted,
         &session_key,
@@ -265,24 +148,12 @@ fn worker_thread(
     let total = packets_in_block(packet.block_id, expected_chunks);
     state.mark_verified(packet.block_id, packet.packet_in_block, total);
 
-    let t = Instant::now();
-
     tx.send(DecryptedChunk {
         chunk_id: packet.chunk_id,
         data: decrypted,
     })?;
-        
-let waited = t.elapsed();
-
-if waited > Duration::from_millis(2) {
-    println!(
-        "[BACKPRESSURE] writer channel blocked {:?}",
-        waited
-    );
-}
     }
 
-    println!("Worker finished.");
     Ok(())
 }
 
@@ -315,9 +186,6 @@ fn writer_thread(
     let mut next_chunk = 0u32;
     let mut pending: HashMap<u32, Vec<u8>> = HashMap::new();
     let mut next_print = 500 * 1024 * 1024;
-    let mut last_status_print = Instant::now();
-
-    let io_start = Instant::now();
 
     while let Ok(chunk) = rx.recv() {
         pending.insert(chunk.chunk_id, chunk.data);
@@ -338,33 +206,12 @@ fn writer_thread(
             }
         }
 
-        if last_status_print.elapsed() > Duration::from_secs(1) {
-            println!(
-                "[DEBUG] writer: chunks_written={chunks_written}/{expected_chunks} next_chunk={next_chunk} pending_buffer={}",
-                pending.len()
-            );
-            last_status_print = Instant::now();
-        }
-
         if next_chunk >= expected_chunks {
             break;
         }
     }
 
     outfile.flush()?;
-
-    println!(
-        "Actual file writes: {:?}",
-        io_start.elapsed()
-    );
-    println!("==============================");
-    println!("Writer statistics");
-    println!("Chunks written : {}", chunks_written);
-    println!("Bytes written  : {}", bytes);
-    println!("Pending buffer at end (should be 0): {}", pending.len());
-    println!("Writer time    : {:.3?}", io_start.elapsed());
-    println!("==============================");
-    println!("Writer finished.");
 
     Ok((bytes, chunks_written))
 }
@@ -396,24 +243,9 @@ fn ack_manager_loop(
     let poll_tick = Duration::from_millis(2);
 
     let mut completed = 0u32;
-    let start = Instant::now();
-    let mut last_progress_print = Instant::now();
-    
-    println!("Ack manager started, awaiting {} block(s)", total_blocks_count);
 
     while completed < total_blocks_count {
-       let (tracked, completed_set) = state.debug_counts();
-
-println!(
-    "[ACK STATE] completed={} total={} tracked={} completed_set={}",
-    completed,
-    total_blocks_count,
-    tracked,
-    completed_set,
-);
-        println!("ACK thread alive");
         let ready = state.ready_for_check(grace, idle_timeout);
-        println!("Ready blocks: {:?}", ready);
         if ready.is_empty() {
             std::thread::sleep(poll_tick);
             continue;
@@ -425,21 +257,10 @@ println!(
             };
 
             if is_complete {
-    println!(
-        "[TIMING] Receiver completed block {} at {:?}",
-        block_id,
-        start.elapsed()
-    );
-
-    BlockAck::Complete { block_id }.write_to(&mut control)?;
-    state.remove(block_id);
-    completed += 1;
-
-    println!(
-        "[DEBUG] block {block_id} confirmed complete ({completed}/{total_blocks_count} done)"
-    );
-}
-            else if rounds > MAX_BLOCK_RETRY_ROUNDS {
+                BlockAck::Complete { block_id }.write_to(&mut control)?;
+                state.remove(block_id);
+                completed += 1;
+            } else if rounds > MAX_BLOCK_RETRY_ROUNDS {
                 println!(
                     "WARNING: block {} still incomplete after {} rounds ({} packet(s) missing) -- giving up on it to avoid stalling the transfer.",
                     block_id, rounds, missing.len()
@@ -448,40 +269,19 @@ println!(
                 state.remove(block_id);
                 completed += 1;
             } else {
-               println!(
-    "[ACK] Block {} | Round {} | Missing {} packets",
-    block_id,
-    rounds,
-    missing.len()
-);
-
-BlockAck::Missing {
-    block_id,
-    missing,
-}
-.write_to(&mut control)?;
+                BlockAck::Missing {
+                    block_id,
+                    missing,
+                }
+                .write_to(&mut control)?;
             }
         }
-
-        if last_progress_print.elapsed() > Duration::from_secs(1) {
-            println!(
-                "[DEBUG] ack manager: {completed}/{total_blocks_count} blocks confirmed complete so far"
-            );
-            last_progress_print = Instant::now();
-        }
     }
-
-    println!(
-        "Ack manager: all {} block(s) resolved in {:.3?}",
-        total_blocks_count,
-        start.elapsed()
-    );
 
     Ok(())
 }
 
 pub fn run() -> Result<()> {
-    let overall_start = Instant::now();
     println!("==============================");
     println!(" Secure File Transfer Receiver");
     println!("==============================");
@@ -599,8 +399,6 @@ pub fn run() -> Result<()> {
 
     drop(write_tx);
 
-    let receive_start = Instant::now();
-
     // UDP receiver thread
     let udp_receiver = udp.try_clone()?;
     let state_for_recv = received_state.clone();
@@ -634,55 +432,30 @@ pub fn run() -> Result<()> {
     // completed after exceeding the retry limit).
     ack_handle.join().unwrap()?;
 
-    println!(
-        "Ack rounds      : {:.3?}",
-        receive_start.elapsed()
-    );
-
     // All blocks resolved -- safe to stop the UDP receive loop now.
     running.store(false, Ordering::Release);
     receiver_handle.join().unwrap()?;
 
-    println!("Joining workers");
     for worker in workers {
         worker.join().unwrap()?;
     }
 
-    let writer_start = Instant::now();
     let (bytes_received, total_chunks_written) = writer_handle.join().unwrap()?;
-    println!(
-        "Writer          : {:.3?}",
-        writer_start.elapsed()
-    );
-
-    println!();
-    println!("Expected Chunks : {}", expected_chunks);
-    println!("Received Chunks : {}", total_chunks_written);
-    println!(
-        "Expected Data : {:.2} MB",
-        expected_bytes as f64 / (1024.0 * 1024.0)
-    );
 
     let elapsed = start.elapsed();
     let seconds = elapsed.as_secs_f64();
     let throughput = bytes_received as f64 / (1024.0 * 1024.0) / seconds;
 
-    println!(
-        "Total receiver runtime: {:.3?}",
-        overall_start.elapsed()
-    );
     println!();
     println!("==============================");
     println!("Transfer Complete");
     println!("==============================");
-    println!("Output File : reconstructed.bin");
-    println!("Chunks      : {}", total_chunks_written);
-    println!(
-        "Data        : {:.2} MB",
-        bytes_received as f64 / (1024.0 * 1024.0)
-    );
-    println!("Time        : {:.3} s", seconds);
-    println!("Throughput  : {:.2} MB/s", throughput);
+    println!("Total time         : {:.3} s", seconds);
+    println!("Throughput         : {:.2} MB/s", throughput);
+    println!("Total chunks       : {}", total_chunks_written);
+    println!("Total blocks       : {}", total_blocks_count);
+    println!("Output file        : reconstructed.bin");
+    println!("Status             : SUCCESS");
 
     Ok(())
 }
