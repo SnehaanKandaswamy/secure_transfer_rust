@@ -48,7 +48,7 @@ pub const PACKETS_PER_BLOCK: usize = 256;
 // keep arriving. 3-4 is the sweet spot the design calls for -- enough to
 // keep the network saturated across the RTTs seen on Wi-Fi, without
 // unbounded cache growth if repairs lag behind.
-pub const PIPELINE_DEPTH: usize = 4;
+pub const PIPELINE_DEPTH: usize = 8;
 
 // After a BlockEnd (or, on the receiver side, after a quiet period with no
 // new packets for the active block), wait this long before checking for
