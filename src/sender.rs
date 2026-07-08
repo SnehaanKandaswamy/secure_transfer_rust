@@ -379,6 +379,25 @@ fn drain_pending(
     }
 }
 
+/// True once the initial transmission of the entire file is completely
+/// done: every chunk the reader/encryption pipeline will ever produce has
+/// been admitted (so no `SenderEvent::Chunk` can arrive again), and no
+/// block is left sitting in `Pending` waiting for a pipeline slot to open
+/// (so nothing is still "waiting to be sent or buffered"). This says
+/// nothing about whether blocks are *resolved* -- only that the sender is
+/// done originating new data, which is the only thing that distinguishes
+/// "still transmitting" from "now just waiting on acks/repairs".
+fn initial_transmission_complete(
+    block_states: &HashMap<u32, BlockSlot>,
+    chunks_admitted: u32,
+    total_chunks: u32,
+) -> bool {
+    chunks_admitted >= total_chunks
+        && !block_states
+            .values()
+            .any(|slot| matches!(slot, BlockSlot::Pending(_)))
+}
+
 /// Sender-side whole-block retransmission fallback. Scans every currently
 /// `Open` block and, for any block whose `BlockEnd` has already been sent
 /// but that has seen *no* ack activity (neither `Missing` nor `Complete`)
@@ -663,6 +682,15 @@ impl Sender {
         // any of them in a second collection.
         let mut block_states: HashMap<u32, BlockSlot> = HashMap::new();
         let mut open_slots: usize = 0;
+        // Count of chunks handed to `admit_or_buffer` so far (placed into
+        // an open block or buffered pending a slot). Once this reaches
+        // `total_chunks`, no further `SenderEvent::Chunk` will ever arrive
+        // -- combined with "no block still `Pending`" below, this is what
+        // gates the whole-block retransmission fallback: it must never
+        // run while the initial transmission is still feeding new chunks
+        // in, only once every packet has been sent and every BlockEnd
+        // emitted.
+        let mut chunks_admitted: u32 = 0;
 
 
         loop {
@@ -692,11 +720,16 @@ impl Sender {
                 Err(RecvTimeoutError::Timeout) => {
                     // No chunk or ack arrived within the check interval --
                     // this is the only place the whole-block fallback is
-                    // evaluated. It never interferes with Missing-driven
-                    // selective retransmission, which runs entirely inside
-                    // the `SenderEvent::Ack(BlockAck::Missing { .. })` arm
-                    // above.
-                    retransmit_stale_blocks(&mut block_states, &udp, &mut retransmitted);
+                    // evaluated, and only once the initial transmission is
+                    // completely done (every chunk admitted, nothing left
+                    // `Pending`). While the file is still being sent, rely
+                    // solely on Missing-driven selective retransmission,
+                    // which runs entirely inside the
+                    // `SenderEvent::Ack(BlockAck::Missing { .. })` arm
+                    // above and is untouched by this gate.
+                    if initial_transmission_complete(&block_states, chunks_admitted, total_chunks) {
+                        retransmit_stale_blocks(&mut block_states, &udp, &mut retransmitted);
+                    }
                     continue;
                 }
                 Err(RecvTimeoutError::Disconnected) => {
@@ -750,6 +783,7 @@ impl Sender {
 
             match event {
                 SenderEvent::Chunk(chunk) => {
+                    chunks_admitted += 1;
                     admit_or_buffer(
                         chunk,
                         &mut block_states,
