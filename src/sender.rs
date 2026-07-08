@@ -77,7 +77,7 @@
 //   one up.
 // ======================================================================
 use anyhow::Result;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use rand::{rngs::OsRng, RngCore};
 use rsa::{
     pkcs8::DecodePublicKey,
@@ -94,11 +94,14 @@ use std::{
 
 use crate::{
     checksum,
-    config::{CHUNK_SIZE, DATA_PORT, RECEIVER_IP, KEY_PORT, PACKETS_PER_BLOCK, PIPELINE_DEPTH},
+    config::{
+        CHUNK_SIZE, DATA_PORT, RECEIVER_IP, KEY_PORT, PACKETS_PER_BLOCK, PIPELINE_DEPTH,
+        WHOLE_BLOCK_RETRANSMIT_TIMEOUT_MS, ACK_ACTIVITY_CHECK_INTERVAL_MS,
+    },
     crypto,
 };
 
-use crossbeam_channel::{bounded, Receiver, Sender as ChannelSender};
+use crossbeam_channel::{bounded, Receiver, RecvTimeoutError, Sender as ChannelSender};
 
 use crate::pipeline::{
     ReadChunk,
@@ -130,6 +133,12 @@ struct BlockState {
     packets: Vec<Option<Vec<u8>>>,
     sent: usize,
     end_emitted: bool,
+    // Whole-block retransmission fallback (see config::WHOLE_BLOCK_RETRANSMIT_TIMEOUT_MS):
+    // timestamp of the last BlockAck::Missing or BlockAck::Complete seen for
+    // this block, and whether the one-shot whole-block resend has already
+    // fired. Neither field affects normal selective retransmission.
+    last_ack_activity: Instant,
+    fallback_sent: bool,
 }
 
 impl BlockState {
@@ -139,6 +148,8 @@ impl BlockState {
             packets: vec![None; total],
             sent: 0,
             end_emitted: false,
+            last_ack_activity: Instant::now(),
+            fallback_sent: false,
         }
     }
 
@@ -237,6 +248,7 @@ fn place_chunk(
             eprintln!("udp send failed (non-fatal, will retry): {e}");
         }
         entry.end_emitted = true;
+        entry.last_ack_activity = Instant::now();
     }
 
 }
@@ -364,6 +376,62 @@ fn drain_pending(
             debug_assert_eq!(bid, next_id, "pending bucket contained a chunk for the wrong block");
             place_chunk(bid, pib, buffered, block_states, udp, bytes_sent, packets_sent, next_print);
         }
+    }
+}
+
+/// Sender-side whole-block retransmission fallback. Scans every currently
+/// `Open` block and, for any block whose `BlockEnd` has already been sent
+/// but that has seen *no* ack activity (neither `Missing` nor `Complete`)
+/// for `WHOLE_BLOCK_RETRANSMIT_TIMEOUT_MS`, resends every cached packet in
+/// that block plus `BlockEnd` once, and marks `fallback_sent` so it never
+/// fires again for that block.
+///
+/// This only covers the case of total silence from the receiver -- a
+/// block that's actively getting `Missing` acks has its
+/// `last_ack_activity` refreshed on every one of those, so it never
+/// qualifies here, and normal selective retransmission continues to
+/// handle it exactly as before.
+fn retransmit_stale_blocks(
+    block_states: &mut HashMap<u32, BlockSlot>,
+    udp: &UdpSocket,
+    retransmitted: &mut u64,
+) {
+    let now = Instant::now();
+    let timeout = std::time::Duration::from_millis(WHOLE_BLOCK_RETRANSMIT_TIMEOUT_MS);
+
+    for (&block_id, slot) in block_states.iter_mut() {
+        let BlockSlot::Open(entry) = slot else {
+            continue;
+        };
+
+        if !entry.end_emitted || entry.fallback_sent {
+            continue;
+        }
+
+        if now.duration_since(entry.last_ack_activity) < timeout {
+            continue;
+        }
+
+        for packet in entry.packets.iter().flatten() {
+            if let Err(e) = udp.send(packet) {
+                eprintln!("udp whole-block resend failed (non-fatal, will retry): {e}");
+            } else {
+                *retransmitted += 1;
+            }
+        }
+
+        let end = BlockEndPacket::encode(block_id, entry.total as u32);
+        if let Err(e) = udp.send(&end) {
+            eprintln!("udp send failed (non-fatal, will retry): {e}");
+        }
+
+        entry.fallback_sent = true;
+        entry.last_ack_activity = Instant::now();
+        println!(
+            "[FALLBACK] no ack activity for block {block_id} in {}ms -- \
+             retransmitted whole block + BlockEnd",
+            WHOLE_BLOCK_RETRANSMIT_TIMEOUT_MS
+        );
     }
 }
 
@@ -619,9 +687,19 @@ impl Sender {
             if completed >= total_blocks {
                 break;
             }
-            let event = match events.recv() {
+            let event = match events.recv_timeout(Duration::from_millis(ACK_ACTIVITY_CHECK_INTERVAL_MS)) {
                 Ok(event) => event,
-                Err(_) => {
+                Err(RecvTimeoutError::Timeout) => {
+                    // No chunk or ack arrived within the check interval --
+                    // this is the only place the whole-block fallback is
+                    // evaluated. It never interferes with Missing-driven
+                    // selective retransmission, which runs entirely inside
+                    // the `SenderEvent::Ack(BlockAck::Missing { .. })` arm
+                    // above.
+                    retransmit_stale_blocks(&mut block_states, &udp, &mut retransmitted);
+                    continue;
+                }
+                Err(RecvTimeoutError::Disconnected) => {
                     // Both relay threads have exited and the channel is
                     // empty (crossbeam only reports Disconnected once
                     // there is nothing left buffered to receive first) --
@@ -685,7 +763,14 @@ impl Sender {
                     );
                 }
                 SenderEvent::Ack(BlockAck::Missing { block_id, missing }) => {
-                
+
+                    // Ack activity for this block -- reset the whole-block
+                    // fallback timer. Deliberately separate from (and
+                    // released before) the read-only snapshot below.
+                    if let Some(BlockSlot::Open(entry)) = block_states.get_mut(&block_id) {
+                        entry.last_ack_activity = Instant::now();
+                    }
+
                     // Read-only snapshot of exactly the cached packets we'd
                     // resend, taken and released before any further access
                     // to `block_states` (and before any I/O), so there's no

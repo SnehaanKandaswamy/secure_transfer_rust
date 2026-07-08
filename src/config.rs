@@ -81,3 +81,18 @@ pub const BLOCK_IDLE_TIMEOUT_MS: u64 = 100;
 // before giving up, instead of the ~400ms the old 8ms grace period
 // actually allowed.
 pub const MAX_BLOCK_RETRY_ROUNDS: u32 = 50;
+
+// ---------------------------------------------------------------------
+// Sender-side whole-block retransmission fallback.
+// ---------------------------------------------------------------------
+
+// If an open block (BlockEnd already sent) has received NO ack activity
+// at all -- neither BlockAck::Missing nor BlockAck::Complete -- for this
+// long, the sender assumes BlockEnd itself (or every packet in the block)
+// was lost and resends the whole cached block plus BlockEnd once, as a
+// fallback on top of the normal Missing-driven selective retransmission.
+pub const WHOLE_BLOCK_RETRANSMIT_TIMEOUT_MS: u64 = 2000;
+
+// How often the block manager loop wakes up (even with no incoming
+// events) to check open blocks for the ack-activity timeout above.
+pub const ACK_ACTIVITY_CHECK_INTERVAL_MS: u64 = 200;
