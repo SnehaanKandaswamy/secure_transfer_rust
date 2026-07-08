@@ -86,16 +86,13 @@ fn receiver_thread(
 
                         let chunk_id = chunk_id_of(pkt.block_id, pkt.packet_in_block);
 
-                        if let Err(e) = tx.send(ReceivedPacket {
-    chunk_id,
-    block_id: pkt.block_id,
-    packet_in_block: pkt.packet_in_block,
-    encrypted: pkt.payload,
-    hash: pkt.hash,
-}) {
-    println!("[DEBUG] receiver_thread: packet channel closed");
-    return Err(e.into());
-}
+                        tx.send(ReceivedPacket {
+                            chunk_id,
+                            block_id: pkt.block_id,
+                            packet_in_block: pkt.packet_in_block,
+                            encrypted: pkt.payload,
+                            hash: pkt.hash,
+                        })?;
                     }
                     TAG_BLOCK_END => {
                         let Some((block_id, total_packets)) = BlockEndPacket::decode(body) else {
@@ -151,13 +148,10 @@ fn worker_thread(
     let total = packets_in_block(packet.block_id, expected_chunks);
     state.mark_verified(packet.block_id, packet.packet_in_block, total);
 
-    if let Err(e) = tx.send(DecryptedChunk {
-    chunk_id: packet.chunk_id,
-    data: decrypted,
-}) {
-    println!("[DEBUG] worker_thread: writer channel closed");
-    return Err(e.into());
-}
+    tx.send(DecryptedChunk {
+        chunk_id: packet.chunk_id,
+        data: decrypted,
+    })?;
     }
 
     Ok(())
@@ -274,11 +268,6 @@ fn ack_manager_loop(
                 state.remove(block_id);
                 completed += 1;
             } else {
-                println!(
-    "[MISSING] block={} missing={:?}",
-    block_id,
-    missing
-);
                 BlockAck::Missing {
                     block_id,
                     missing,

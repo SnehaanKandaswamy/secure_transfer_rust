@@ -77,7 +77,7 @@
 //   one up.
 // ======================================================================
 use anyhow::Result;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use rand::{rngs::OsRng, RngCore};
 use rsa::{
     pkcs8::DecodePublicKey,
@@ -94,15 +94,11 @@ use std::{
 
 use crate::{
     checksum,
-    config::{
-        CHUNK_SIZE, DATA_PORT, RECEIVER_IP, KEY_PORT,
-        PACKETS_PER_BLOCK, PIPELINE_DEPTH,
-        STALL_REBLAST_MS, MAX_STALL_REBLASTS,
-    },
+    config::{CHUNK_SIZE, DATA_PORT, RECEIVER_IP, KEY_PORT, PACKETS_PER_BLOCK, PIPELINE_DEPTH},
     crypto,
 };
 
-use crossbeam_channel::{bounded, Receiver, RecvTimeoutError, Sender as ChannelSender};
+use crossbeam_channel::{bounded, Receiver, Sender as ChannelSender};
 
 use crate::pipeline::{
     ReadChunk,
@@ -134,11 +130,6 @@ struct BlockState {
     packets: Vec<Option<Vec<u8>>>,
     sent: usize,
     end_emitted: bool,
-    // Set the instant BlockEnd is emitted; used by `reblast_stalled_blocks`
-    // to detect a block that's been fully sent but has produced zero ack
-    // activity for a suspiciously long time -- see its doc comment.
-    end_emitted_at: Option<Instant>,
-    stall_reblasts: u32,
 }
 
 impl BlockState {
@@ -148,8 +139,6 @@ impl BlockState {
             packets: vec![None; total],
             sent: 0,
             end_emitted: false,
-            end_emitted_at: None,
-            stall_reblasts: 0,
         }
     }
 
@@ -248,7 +237,6 @@ fn place_chunk(
             eprintln!("udp send failed (non-fatal, will retry): {e}");
         }
         entry.end_emitted = true;
-        entry.end_emitted_at = Some(Instant::now());
     }
 
 }
@@ -375,60 +363,6 @@ fn drain_pending(
             let (bid, pib) = block_of(buffered.chunk_id);
             debug_assert_eq!(bid, next_id, "pending bucket contained a chunk for the wrong block");
             place_chunk(bid, pib, buffered, block_states, udp, bytes_sent, packets_sent, next_print);
-        }
-    }
-}
-
-/// Fallback of last resort for a block the receiver may never have learned
-/// exists at all -- e.g. every one of its data packets *and* its BlockEnd
-/// were lost together, which the normal Missing-ack repair path can never
-/// trigger, because that path depends on the receiver having a tracking
-/// entry for the block in the first place (see `SharedReceiverState` in
-/// transport.rs -- entries are created reactively, off received packets,
-/// never proactively).
-///
-/// Only ever called once `block_manager_loop`'s `events.recv_timeout` has
-/// gone quiet -- i.e. there is genuinely nothing else for this thread to
-/// do -- so it never competes for bandwidth with a block that's still
-/// being repaired normally via `BlockAck::Missing`. Blind re-sends the
-/// entire cached block plus a fresh BlockEnd; harmless if the receiver
-/// already has some or all of it, since `mark_verified` on that side
-/// ignores packets it's already counted.
-fn reblast_stalled_blocks(block_states: &mut HashMap<u32, BlockSlot>, udp: &UdpSocket) {
-    let now = Instant::now();
-
-    for (&block_id, slot) in block_states.iter_mut() {
-        let BlockSlot::Open(entry) = slot else {
-            continue;
-        };
-
-        // Not fully sent yet -- normal in-progress block, not stalled.
-        let Some(emitted_at) = entry.end_emitted_at else {
-            continue;
-        };
-
-        if now.duration_since(emitted_at) < Duration::from_millis(STALL_REBLAST_MS) {
-            continue;
-        }
-
-        if entry.stall_reblasts >= MAX_STALL_REBLASTS {
-            continue;
-        }
-
-        for packet in entry.packets.iter().flatten() {
-            let _ = udp.send(packet);
-        }
-        let end = BlockEndPacket::encode(block_id, entry.total as u32);
-        let _ = udp.send(&end);
-
-        entry.stall_reblasts += 1;
-        entry.end_emitted_at = Some(now);
-
-        if entry.stall_reblasts == MAX_STALL_REBLASTS {
-            println!(
-                "WARNING: block {block_id} fully re-sent {MAX_STALL_REBLASTS} times with no ack \
-                 activity at all -- giving up on blind retransmission for it."
-            );
         }
     }
 }
@@ -685,18 +619,9 @@ impl Sender {
             if completed >= total_blocks {
                 break;
             }
-            let event = match events.recv_timeout(Duration::from_millis(STALL_REBLAST_MS)) {
+            let event = match events.recv() {
                 Ok(event) => event,
-                Err(RecvTimeoutError::Timeout) => {
-                    // Nothing to do right now -- the thread would otherwise
-                    // just block again. Use the gap to blind-resend any
-                    // block that's been fully sent but has produced zero
-                    // ack activity in a suspiciously long time (see
-                    // `reblast_stalled_blocks`'s doc comment).
-                    reblast_stalled_blocks(&mut block_states, &udp);
-                    continue;
-                }
-                Err(RecvTimeoutError::Disconnected) => {
+                Err(_) => {
                     // Both relay threads have exited and the channel is
                     // empty (crossbeam only reports Disconnected once
                     // there is nothing left buffered to receive first) --
@@ -760,11 +685,6 @@ impl Sender {
                     );
                 }
                 SenderEvent::Ack(BlockAck::Missing { block_id, missing }) => {
-                    println!(
-    "[RESEND] block={} packets={:?}",
-    block_id,
-    missing
-);
                 
                     // Read-only snapshot of exactly the cached packets we'd
                     // resend, taken and released before any further access
