@@ -571,6 +571,11 @@ impl Sender {
             }
             BlockAck::Missing { block_id, missing } => {
                 println!(
+    "[RECV MISSING] block={} packets={}",
+    block_id,
+    missing.len()
+);
+                println!(
                     "[ACK RELAY] Missing {} ({} packets)",
                     block_id,
                     missing.len()
@@ -754,6 +759,11 @@ impl Sender {
                     };
 
                     if let Some(packets) = cached {
+                        println!(
+    "[RETX] block={} packets={}",
+    block_id,
+    packets.len()
+);
                        
                         for packet in &packets {
                             if let Err(e) = udp.send(packet) {
