@@ -217,6 +217,9 @@ fn place_chunk(
     if let Err(e) = udp.send(&chunk.packet) {
         eprintln!("udp send failed (non-fatal, will retry): {e}");
     }
+    if packet_in_block % 32 == 31 {
+    std::thread::sleep(std::time::Duration::from_micros(200));
+}
 
     *packets_sent += 1;
     *bytes_sent += chunk.bytes as u64;
