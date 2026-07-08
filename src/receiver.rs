@@ -245,6 +245,12 @@ fn ack_manager_loop(
     let mut completed = 0u32;
 
     while completed < total_blocks_count {
+            println!(
+        "[LOOP] completed={}/{}",
+        completed,
+        total_blocks_count
+    );
+
         let ready = state.ready_for_check(grace, idle_timeout);
         if ready.is_empty() {
             std::thread::sleep(poll_tick);
@@ -287,6 +293,7 @@ fn ack_manager_loop(
 }
         }
     }
+    println!("[ACK MANAGER EXIT]");
 
     Ok(())
 }
