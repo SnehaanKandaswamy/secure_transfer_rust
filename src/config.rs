@@ -66,7 +66,7 @@ pub const PIPELINE_DEPTH: usize = 4;
 // previous retransmit had any chance to land, burning through
 // MAX_BLOCK_RETRY_ROUNDS in well under half a second and force-completing
 // blocks that were still genuinely missing data (silent corruption).
-pub const BLOCK_GRACE_PERIOD_MS: u64 = 50;
+pub const BLOCK_GRACE_PERIOD_MS: u64 = 1-0;
 
 // If no packets at all arrive for the currently-active block for this long,
 // the receiver proactively checks it rather than waiting indefinitely for a
