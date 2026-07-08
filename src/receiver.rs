@@ -77,8 +77,17 @@ fn receiver_thread(
                 match tag {
                     TAG_DATA => {
                         let Some(pkt) = DataPacket::decode(body) else {
-                            continue;
-                        };
+    println!(
+        "[UDP] Failed to decode DATA packet (size={})",
+        body.len()
+    );
+    continue;
+};
+                        println!(
+    "[UDP] DATA block={} packet={}",
+    pkt.block_id,
+    pkt.packet_in_block
+);
 
                         let total = packets_in_block(pkt.block_id, expected_chunks);
 
@@ -96,8 +105,13 @@ fn receiver_thread(
                     }
                     TAG_BLOCK_END => {
                         let Some((block_id, total_packets)) = BlockEndPacket::decode(body) else {
-                            continue;
-                        };
+    println!(
+        "[UDP] Failed to decode BLOCK_END (size={})",
+        body.len()
+    );
+    continue;
+};
+                        println!("[UDP] END block={}", block_id);
 
                         state.mark_end_seen(block_id, total_packets as usize);
                     }
