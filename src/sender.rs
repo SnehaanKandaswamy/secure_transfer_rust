@@ -441,7 +441,11 @@ impl Sender {
             }
 
             buffer.truncate(bytes);
-                
+                println!(
+                "[READER] chunk={} ",
+                chunk_id,
+            
+            );
             tx.send(
                 ReadChunk {
                     chunk_id,
