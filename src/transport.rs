@@ -317,20 +317,6 @@ impl SharedReceiverState {
         let guard = self.inner.lock().unwrap();
 let now = Instant::now();
 
-println!("----- BLOCK STATE -----");
-for (&id, e) in &guard.blocks {
-    println!(
-        "block={} complete={} end_seen={} received={}/{} rounds={} idle_ms={}",
-        id,
-        e.is_complete(),
-        e.end_seen,
-        e.received_count,
-        e.total,
-        e.rounds,
-        now.duration_since(e.last_activity).as_millis(),
-    );
-}
-println!("-----------------------");
 
         guard
             .blocks
