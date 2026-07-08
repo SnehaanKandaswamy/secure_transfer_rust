@@ -371,10 +371,12 @@ impl SharedReceiverState {
     /// duplicate packet arriving right around resolution time can never
     /// resurrect a finished block's tracking entry.
     pub fn remove(&self, block_id: u32) {
-        let mut guard = self.inner.lock().unwrap();
-        guard.blocks.remove(&block_id);
-        guard.completed.insert(block_id);
-    }
+    println!("[REMOVE] block={}", block_id);
+
+    let mut guard = self.inner.lock().unwrap();
+    guard.blocks.remove(&block_id);
+    guard.completed.insert(block_id);
+}
 }
 impl Default for SharedReceiverState {
     fn default() -> Self {
