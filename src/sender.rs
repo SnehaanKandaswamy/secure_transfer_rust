@@ -441,7 +441,11 @@ impl Sender {
             }
 
             buffer.truncate(bytes);
-
+                println!(
+                "[READER] chunk={} ",
+                chunk_id,
+            
+            );
             tx.send(
                 ReadChunk {
                     chunk_id,
@@ -537,6 +541,12 @@ impl Sender {
     // ------------------------------------------------------------------
     fn chunk_relay(rx: Receiver<EncryptedChunk>, tx: ChannelSender<SenderEvent>) {
         while let Ok(chunk) = rx.recv() {
+            
+                println!(
+                        "[WORKER] chunk={} block={}",
+                        chunk.chunk_id,
+                        chunk.chunk_id / PACKETS_PER_BLOCK as u32
+                    );
             if tx.send(SenderEvent::Chunk(chunk)).is_err() {
                 break;
             }
@@ -553,9 +563,23 @@ impl Sender {
     fn ack_relay(mut control: TcpStream, tx: ChannelSender<SenderEvent>) {
         loop {
             let ack = match BlockAck::read_from(&mut control) {
-                Ok(ack) => ack,
-                Err(_) => break,
-            };
+    Ok(ack) => {
+        match &ack {
+            BlockAck::Complete { block_id } => {
+                println!("[ACK RELAY] Complete {}", block_id);
+            }
+            BlockAck::Missing { block_id, missing } => {
+                println!(
+                    "[ACK RELAY] Missing {} ({} packets)",
+                    block_id,
+                    missing.len()
+                );
+            }
+        }
+        ack
+    }
+    Err(_) => break,
+};
             if tx.send(SenderEvent::Ack(ack)).is_err() {
                 break;
             }
@@ -625,10 +649,12 @@ impl Sender {
     );
     break;
 }           
-
+            println!("[BLOCK MANAGER] waiting for event");
             let event = match events.recv() {
-                Ok(event) => event,
-                Err(_) => {
+                Ok(event) => {
+                println!("[BLOCK MANAGER] got event");
+                event
+                }Err(_) => {
                     // Both relay threads have exited and the channel is
                     // empty (crossbeam only reports Disconnected once
                     // there is nothing left buffered to receive first) --
