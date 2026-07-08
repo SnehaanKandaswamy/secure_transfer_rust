@@ -193,45 +193,74 @@ impl BlockRxEntry {
 /// removed as soon as that block is confirmed complete (or given up on) and
 /// handed off, so memory stays bounded to roughly `PIPELINE_DEPTH` blocks
 /// regardless of file size -- mirrors `SharedBlockCache` on the sender side.
+// ---------------------------------------------------------------------
+// FIX (nondeterministic hang on large files): `inner` (active block
+// state) and `completed_blocks` (resolved ids) used to be two separately
+// locked collections. `remove()` wrote to them one after another --
+// `inner.lock()...remove(..)` THEN `completed_blocks.lock()...insert(..)`
+// -- with a real gap between the two lock acquisitions. Every mutator
+// (`touch_activity`, `mark_verified`, `mark_end_seen`) did
+// `is_completed(id)` (reads completed_blocks) and THEN, if false,
+// separately locked `inner` to `entry(id).or_insert_with(..)`.
+//
+// That "check completed_blocks, then act on inner" was not atomic with
+// respect to `remove`'s "clear inner, then mark completed_blocks". A late
+// duplicate datagram -- a still-in-flight retransmit copy, or a decrypt
+// worker finishing a touch/verify a few instructions late -- landing in
+// the gap between remove()'s two lock acquisitions would see
+// `is_completed() == false` (not yet in completed_blocks) and silently
+// resurrect a brand-new, empty `BlockRxEntry` for a block that had
+// already been fully received, written, and acked.
+//
+// That resurrected entry doesn't lose data (the writer already has the
+// real bytes), but `ack_manager_loop` eventually times it out and force-
+// completes it, sending a *second* `BlockAck::Complete` for a block that
+// was only genuinely completed once, and incrementing the ack loop's
+// local `completed` counter a second time. Since `ack_manager_loop` exits
+// as soon as `completed >= total_blocks_count`, that phantom extra count
+// can let it exit *before* some other, genuinely-still-repairing block
+// ever gets its real Complete sent -- and the sender's
+// `block_manager_loop`, which is blocked waiting for exactly that ack,
+// then waits forever, because the receiver's ack thread has already shut
+// down and will never answer it. Larger files simply give this race many
+// more chances (more packets, more retransmit duplicates in flight) to
+// land in that window, which is why it only shows up on 500MB+ transfers
+// and on a different block id each time.
+//
+// Fix: put both pieces of state behind exactly one lock, so "is this
+// block already resolved" and "resolve/insert this block" can never be
+// observed inconsistently by two different threads.
+// ---------------------------------------------------------------------
+struct ReceiverInner {
+    blocks: HashMap<u32, BlockRxEntry>,
+    completed: std::collections::HashSet<u32>,
+}
+
 #[derive(Clone)]
 pub struct SharedReceiverState {
-    inner: Arc<Mutex<HashMap<u32, BlockRxEntry>>>,
-    // Block ids that have already been confirmed complete (or force-
-    // completed) and removed from `inner`. Needed because the sender may
-    // have queued more than one retransmit for the same still-missing
-    // packet before the receiver's first "Missing" report actually reached
-    // it - those extra copies are still in flight when the block finishes,
-    // and arrive afterward. Without this guard, `touch_activity` (which
-    // runs unconditionally on every raw packet arrival) would silently
-    // recreate a brand-new, empty tracking entry for an already-finished
-    // block via `entry(block_id).or_insert_with(...)`, restarting an entire
-    // repair cycle for a block that was already done and double-counting
-    // its completion.
-    completed_blocks: Arc<Mutex<std::collections::HashSet<u32>>>,
+    inner: Arc<Mutex<ReceiverInner>>,
 }
 
 impl SharedReceiverState {
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(Mutex::new(HashMap::new())),
-            completed_blocks: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            inner: Arc::new(Mutex::new(ReceiverInner {
+                blocks: HashMap::new(),
+                completed: std::collections::HashSet::new(),
+            })),
         }
-    }
-   
-
-    fn is_completed(&self, block_id: u32) -> bool {
-        self.completed_blocks.lock().unwrap().contains(&block_id)
     }
 
     /// Called by the raw UDP receiver thread on every data packet, purely to
     /// keep the "is this block still active" timer fresh. Does NOT affect
     /// the received bitmap -- see the correctness note on `BlockRxEntry`.
     pub fn touch_activity(&self, block_id: u32, total: usize) {
-        if self.is_completed(block_id) {
+        let mut guard = self.inner.lock().unwrap();
+        if guard.completed.contains(&block_id) {
             return;
         }
-        let mut guard = self.inner.lock().unwrap();
         let entry = guard
+            .blocks
             .entry(block_id)
             .or_insert_with(|| BlockRxEntry::new(total));
         entry.last_activity = Instant::now();
@@ -241,35 +270,36 @@ impl SharedReceiverState {
     /// its checksum verified. This is the only thing that can mark a
     /// packet "received" for ack purposes.
     pub fn mark_verified(&self, block_id: u32, packet_in_block: u16, total: usize) {
-    if self.is_completed(block_id) {
-        return;
+        let mut guard = self.inner.lock().unwrap();
+        if guard.completed.contains(&block_id) {
+            return;
+        }
+
+        let entry = guard
+            .blocks
+            .entry(block_id)
+            .or_insert_with(|| BlockRxEntry::new(total));
+
+        let idx = packet_in_block as usize;
+
+        if idx < entry.received.len() && !entry.received[idx] {
+            entry.received[idx] = true;
+            entry.received_count += 1;
+        }
     }
-
-    let mut guard = self.inner.lock().unwrap();
-    let entry = guard
-        .entry(block_id)
-        .or_insert_with(|| BlockRxEntry::new(total));
-
-    let idx = packet_in_block as usize;
-
-    if idx < entry.received.len() && !entry.received[idx] {
-        entry.received[idx] = true;
-        entry.received_count += 1;
-    }
-}
 
     /// Records that a BlockEnd datagram arrived for this block.
     pub fn mark_end_seen(&self, block_id: u32, total: usize) {
-        if self.is_completed(block_id) {
+        let mut guard = self.inner.lock().unwrap();
+        if guard.completed.contains(&block_id) {
             return;
         }
-        let mut guard = self.inner.lock().unwrap();
         let entry = guard
+            .blocks
             .entry(block_id)
             .or_insert_with(|| BlockRxEntry::new(total));
         entry.end_seen = true;
         entry.last_activity = Instant::now();
-        
     }
 
     /// Returns block ids ready to be checked right now: either BlockEnd was
@@ -283,50 +313,46 @@ impl SharedReceiverState {
     /// genuinely needs more than one round trip to repair gets re-checked
     /// at the exact same short interval every time, re-requesting packets
     /// whose previous retransmit hasn't had a chance to land yet.
-   pub fn ready_for_check(&self, grace: Duration, idle_timeout: Duration) -> Vec<u32> {
-    let guard = self.inner.lock().unwrap();
-    let now = Instant::now();
+    pub fn ready_for_check(&self, grace: Duration, idle_timeout: Duration) -> Vec<u32> {
+        let guard = self.inner.lock().unwrap();
+        let now = Instant::now();
 
-
-    
-
-    let ready = guard
-        .iter()
-        .filter(|(_, e)| {
+        guard
+            .blocks
+            .iter()
+            .filter(|(_, e)| {
                 let elapsed = now.duration_since(e.last_activity);
 
-        // Block is complete.
-        if e.is_complete() {
-            // If we saw BlockEnd, wait the normal grace period.
-            if e.end_seen {
-                return elapsed >= grace;
-            }
+                // Block is complete.
+                if e.is_complete() {
+                    // If we saw BlockEnd, wait the normal grace period.
+                    if e.end_seen {
+                        return elapsed >= grace;
+                    }
 
-            // If BlockEnd was lost, don't wait forever.
-            return elapsed >= idle_timeout;
-        }
+                    // If BlockEnd was lost, don't wait forever.
+                    return elapsed >= idle_timeout;
+                }
 
-        // Block is incomplete.
-        if e.end_seen {
-            let required =
-                grace.saturating_mul(e.rounds + 1).min(idle_timeout);
-            elapsed >= required
-        } else {
-            elapsed >= idle_timeout
-        }
-        })
-        .map(|(&id, _)| id)
-        .collect::<Vec<_>>();
+                // Block is incomplete.
+                if e.end_seen {
+                    let required =
+                        grace.saturating_mul(e.rounds + 1).min(idle_timeout);
+                    elapsed >= required
+                } else {
+                    elapsed >= idle_timeout
+                }
+            })
+            .map(|(&id, _)| id)
+            .collect::<Vec<_>>()
+    }
 
-
-    ready
-}
- /// Snapshots a block's state for building an ack, and bumps its retry
+    /// Snapshots a block's state for building an ack, and bumps its retry
     /// round counter (checked against MAX_BLOCK_RETRY_ROUNDS by the caller).
     /// Returns `(is_complete, missing_ids, rounds_so_far)`.
     pub fn snapshot_and_tick(&self, block_id: u32) -> Option<(bool, Vec<u16>, u32)> {
         let mut guard = self.inner.lock().unwrap();
-        let entry = guard.get_mut(&block_id)?;
+        let entry = guard.blocks.get_mut(&block_id)?;
         entry.rounds += 1;
         entry.last_activity = Instant::now();
         Some((entry.is_complete(), entry.missing_ids(), entry.rounds))
@@ -338,16 +364,20 @@ impl SharedReceiverState {
     /// completed so any late-arriving duplicate packets for it (e.g. an
     /// extra retransmit copy still in flight when the block finished) are
     /// recognized and ignored instead of recreating a fresh entry.
+    ///
+    /// Both writes happen under the *same* lock acquisition now -- this is
+    /// the actual fix. There is no longer a window where a block id is
+    /// absent from `blocks` but not yet present in `completed`, so a late
+    /// duplicate packet arriving right around resolution time can never
+    /// resurrect a finished block's tracking entry.
     pub fn remove(&self, block_id: u32) {
-
-    self.inner.lock().unwrap().remove(&block_id);
-    self.completed_blocks.lock().unwrap().insert(block_id);
-}
-
+        let mut guard = self.inner.lock().unwrap();
+        guard.blocks.remove(&block_id);
+        guard.completed.insert(block_id);
+    }
 }
 impl Default for SharedReceiverState {
     fn default() -> Self {
         Self::new()
     }
 }
-
