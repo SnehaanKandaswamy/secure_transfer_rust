@@ -267,14 +267,21 @@ fn ack_manager_loop(
                 BlockAck::Complete { block_id }.write_to(&mut control)?;
                 state.remove(block_id);
                 completed += 1;
+            } 
             } else {
-                BlockAck::Missing {
-                    block_id,
-                    missing,
-                }
-                .write_to(&mut control)?;
-            }
-        }
+    println!(
+        "[MISSING] block={} missing={}",
+        block_id,
+        missing.len()
+    );
+
+    BlockAck::Missing {
+        block_id,
+        missing,
+    }
+    .write_to(&mut control)?;
+}
+        
     }
 
     Ok(())

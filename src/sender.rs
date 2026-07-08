@@ -797,6 +797,11 @@ impl Sender {
                     );
                 }
                 SenderEvent::Ack(BlockAck::Missing { block_id, missing }) => {
+                    println!(
+    "[RESEND] block={} packets={}",
+    block_id,
+    missing.len()
+);
 
                     // Ack activity for this block -- reset the whole-block
                     // fallback timer. Deliberately separate from (and
