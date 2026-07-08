@@ -580,8 +580,12 @@ impl Sender {
         ack
     }
     Err(_) => break,
+
 };
-            if tx.send(SenderEvent::Ack(ack)).is_err() {
+                if let BlockAck::Complete(id) = ack {
+    println!("[ACK RELAY] COMPLETE {}", id);
+}
+                if tx.send(SenderEvent::Ack(ack)).is_err() {
                 break;
             }
         }
@@ -759,6 +763,7 @@ impl Sender {
                     // borrow released immediately) before deciding how to  
                     // resolve it -- avoids the get/insert borrow conflict
                     // entirely instead of fighting it.
+                    println!("[BLOCK MANAGER] COMPLETE {}", id);
                     println!("[ACK RX] Complete received for {}", block_id);
                     println!("[SENDER] Completed block {}", block_id);
                 
