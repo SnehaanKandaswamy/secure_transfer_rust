@@ -760,6 +760,11 @@ impl Sender {
                     );
                 }
                 SenderEvent::Ack(BlockAck::Missing { block_id, missing }) => {
+                    println!(
+    "[RESEND] block={} packets={:?}",
+    block_id,
+    missing
+);
                 
                     // Read-only snapshot of exactly the cached packets we'd
                     // resend, taken and released before any further access

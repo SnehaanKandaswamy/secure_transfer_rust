@@ -274,6 +274,11 @@ fn ack_manager_loop(
                 state.remove(block_id);
                 completed += 1;
             } else {
+                println!(
+    "[MISSING] block={} missing={:?}",
+    block_id,
+    missing
+);
                 BlockAck::Missing {
                     block_id,
                     missing,
