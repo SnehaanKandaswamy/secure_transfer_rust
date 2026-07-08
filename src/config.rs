@@ -1,6 +1,6 @@
 //BEST
 pub const HOST: &str = "0.0.0.0";
-pub const RECEIVER_IP: &str = "192.168.1.178";
+pub const RECEIVER_IP: &str = "169.254.186.4";
 pub const DATA_PORT: u16 = 5000;
 
 pub const KEY_PORT: u16 = 5001;
