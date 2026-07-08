@@ -1,6 +1,6 @@
 //BEST
 pub const HOST: &str = "0.0.0.0";
-pub const RECEIVER_IP: &str = "169.254.186.4";
+pub const RECEIVER_IP: &str = "192.168.1.178";
 pub const DATA_PORT: u16 = 5000;
 
 pub const KEY_PORT: u16 = 5001;
@@ -20,7 +20,7 @@ pub const TCP_BUFFER: usize = 1024 * 1024;
 pub const ACK_INTERVAL: u32 = 128;
 
 // Retransmit if we haven't heard an ACK
-// for this long.9
+// for this long.
 pub const RETRANSMIT_TIMEOUT_MS: u64 = 10;
 pub const WINDOW_SIZE: usize = 256;
 pub const RETRANSMIT_BATCH_SIZE: usize = 4096;
@@ -81,3 +81,13 @@ pub const BLOCK_IDLE_TIMEOUT_MS: u64 = 100;
 // before giving up, instead of the ~400ms the old 8ms grace period
 // actually allowed.
 pub const MAX_BLOCK_RETRY_ROUNDS: u32 = 50;
+
+// Sender-side fallback: if a fully-sent block (BlockEnd already emitted)
+// produces no ack activity for this long, the receiver may never have
+// learned it exists at all -- e.g. every data packet *and* the BlockEnd
+// were lost together, which nothing on the receiver side can detect on
+// its own. Blind-resend the cached block instead of waiting on a repair
+// request that can never arrive. Only fires once events.recv() has gone
+// quiet, so it never competes with the normal Missing-ack repair path.
+pub const STALL_REBLAST_MS: u64 = 1000;
+pub const MAX_STALL_REBLASTS: u32 = 10;
