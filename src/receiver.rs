@@ -252,6 +252,8 @@ fn ack_manager_loop(
     );
 
         let ready = state.ready_for_check(grace, idle_timeout);
+        println!("tracked blocks = {}", state.tracked_blocks());
+println!("ready = {:?}", ready);
         if ready.is_empty() {
             std::thread::sleep(poll_tick);
             continue;

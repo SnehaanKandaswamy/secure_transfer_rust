@@ -392,6 +392,9 @@ println!("-----------------------");
     guard.blocks.remove(&block_id);
     guard.completed.insert(block_id);
 }
+pub fn tracked_blocks(&self) -> usize {
+    self.inner.lock().unwrap().blocks.len()
+}
 }
 impl Default for SharedReceiverState {
     fn default() -> Self {
