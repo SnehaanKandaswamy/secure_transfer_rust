@@ -231,9 +231,18 @@ impl SharedReceiverState {
             return;
         }
         let mut guard = self.inner.lock().unwrap();
-        let entry = guard
-            .entry(block_id)
-            .or_insert_with(|| BlockRxEntry::new(total));
+       let existed = guard.contains_key(&block_id);
+
+if !existed {
+    println!(
+        "[RACE?] Creating NEW entry for block {}",
+        block_id
+    );
+}
+
+let entry = guard
+    .entry(block_id)
+    .or_insert_with(|| BlockRxEntry::new(total));
         entry.last_activity = Instant::now();
     }
 
