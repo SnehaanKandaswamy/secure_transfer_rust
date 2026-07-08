@@ -1,6 +1,6 @@
 //BEST
 pub const HOST: &str = "0.0.0.0";
-pub const RECEIVER_IP: &str = "192.168.1.178";
+pub const RECEIVER_IP: &str = "192.168.1.179";
 pub const DATA_PORT: u16 = 5000;
 
 pub const KEY_PORT: u16 = 5001;
@@ -20,7 +20,7 @@ pub const TCP_BUFFER: usize = 1024 * 1024;
 pub const ACK_INTERVAL: u32 = 128;
 
 // Retransmit if we haven't heard an ACK
-// for this long.
+// for this long.9
 pub const RETRANSMIT_TIMEOUT_MS: u64 = 10;
 pub const WINDOW_SIZE: usize = 256;
 pub const RETRANSMIT_BATCH_SIZE: usize = 4096;
