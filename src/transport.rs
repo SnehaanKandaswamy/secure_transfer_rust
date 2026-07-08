@@ -372,15 +372,10 @@ let now = Instant::now();
     /// duplicate packet arriving right around resolution time can never
     /// resurrect a finished block's tracking entry.
     pub fn remove(&self, block_id: u32) {
-    println!("[REMOVE] block={}", block_id);
-
-    let mut guard = self.inner.lock().unwrap();
-    guard.blocks.remove(&block_id);
-    guard.completed.insert(block_id);
-}
-pub fn tracked_blocks(&self) -> usize {
-    self.inner.lock().unwrap().blocks.len()
-}
+        let mut guard = self.inner.lock().unwrap();
+        guard.blocks.remove(&block_id);
+        guard.completed.insert(block_id);
+    }
 }
 impl Default for SharedReceiverState {
     fn default() -> Self {

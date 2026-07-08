@@ -1,4 +1,3 @@
-//DEBUG VERSION WHICH WORKS
 //BEST
 //
 // ======================================================================
@@ -78,7 +77,7 @@
 //   one up.
 // ======================================================================
 use anyhow::Result;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use rand::{rngs::OsRng, RngCore};
 use rsa::{
     pkcs8::DecodePublicKey,
@@ -208,18 +207,10 @@ fn place_chunk(
 
     // Cache-before-send ordering, unchanged from the earlier fix.
     entry.packets[packet_in_block as usize] = Some(chunk.packet.clone());
-    println!(
-    "[SEND] DATA block={} packet={}",
-    block_id,
-    packet_in_block
-);
 
     if let Err(e) = udp.send(&chunk.packet) {
         eprintln!("udp send failed (non-fatal, will retry): {e}");
     }
-    if packet_in_block % 32 == 31 {
-    std::thread::sleep(std::time::Duration::from_micros(200));
-}
 
     *packets_sent += 1;
     *bytes_sent += chunk.bytes as u64;
@@ -241,7 +232,6 @@ fn place_chunk(
             entry.total
         );
         let end = BlockEndPacket::encode(block_id, entry.total as u32);
-        println!("[SEND] END block={}", block_id);
 
         if let Err(e) = udp.send(&end) {
             eprintln!("udp send failed (non-fatal, will retry): {e}");
@@ -451,11 +441,6 @@ impl Sender {
             }
 
             buffer.truncate(bytes);
-                println!(
-                "[READER] chunk={} ",
-                chunk_id,
-            
-            );
             tx.send(
                 ReadChunk {
                     chunk_id,
@@ -551,12 +536,6 @@ impl Sender {
     // ------------------------------------------------------------------
     fn chunk_relay(rx: Receiver<EncryptedChunk>, tx: ChannelSender<SenderEvent>) {
         while let Ok(chunk) = rx.recv() {
-            
-                println!(
-                        "[WORKER] chunk={} block={}",
-                        chunk.chunk_id,
-                        chunk.chunk_id / PACKETS_PER_BLOCK as u32
-                    );
             if tx.send(SenderEvent::Chunk(chunk)).is_err() {
                 break;
             }
@@ -573,40 +552,11 @@ impl Sender {
     fn ack_relay(mut control: TcpStream, tx: ChannelSender<SenderEvent>) {
         loop {
             let ack = match BlockAck::read_from(&mut control) {
-    Ok(ack) => {
-        match &ack {
-            BlockAck::Complete { block_id } => {
-                println!("[ACK RELAY] Complete {}", block_id);
-            }
-            BlockAck::Missing { block_id, missing } => {
-                println!(
-    "[RECV MISSING] block={} packets={}",
-    block_id,
-    missing.len()
-);
-                println!(
-                    "[ACK RELAY] Missing {} ({} packets)",
-                    block_id,
-                    missing.len()
-                );
-            }
-        }
-        ack
-    }
-    Err(_) => break,
+                Ok(ack) => ack,
+                Err(_) => break,
+            };
 
-};
-                match &ack {
-    BlockAck::Complete { block_id } => {
-        println!("[ACK RELAY] COMPLETE {}", block_id);
-    }
-
-    BlockAck::Missing { block_id, .. } => {
-        println!("[ACK RELAY] MISSING {}", block_id);
-    }
-}
-
-                if tx.send(SenderEvent::Ack(ack)).is_err() {
+            if tx.send(SenderEvent::Ack(ack)).is_err() {
                 break;
             }
         }
@@ -667,20 +617,11 @@ impl Sender {
             );
             
             if completed >= total_blocks {
-    println!(
-        "[EXIT] completed={} total={} open_slots={}",
-        completed,
-        total_blocks,
-        open_slots
-    );
-    break;
-}           
-            println!("[BLOCK MANAGER] waiting for event");
+                break;
+            }
             let event = match events.recv() {
-                Ok(event) => {
-                println!("[BLOCK MANAGER] got event");
-                event
-                }Err(_) => {
+                Ok(event) => event,
+                Err(_) => {
                     // Both relay threads have exited and the channel is
                     // empty (crossbeam only reports Disconnected once
                     // there is nothing left buffered to receive first) --
@@ -700,11 +641,6 @@ impl Sender {
                         &mut packets_sent,
                         &mut next_print,
                     );
-                    for (id, slot) in &block_states {
-                        if let BlockSlot::Open(_) = slot {
-                            println!("[DEBUG] STILL OPEN BLOCK {}", id);
-                        }
-                    }
 
                     if completed >= total_blocks {
                         break;
@@ -768,12 +704,6 @@ impl Sender {
                     };
 
                     if let Some(packets) = cached {
-                        println!(
-    "[RETX] block={} packets={}",
-    block_id,
-    packets.len()
-);
-                       
                         for packet in &packets {
                             if let Err(e) = udp.send(packet) {
                             eprintln!("udp resend failed (non-fatal, will retry): {e}");
@@ -786,27 +716,15 @@ impl Sender {
                 }
                 SenderEvent::Ack(BlockAck::Complete { block_id }) => {
                     // Snapshot what this id currently is (owned data only,
-                    // borrow released immediately) before deciding how to  
+                    // borrow released immediately) before deciding how to
                     // resolve it -- avoids the get/insert borrow conflict
                     // entirely instead of fighting it.
-                    println!("[BLOCK MANAGER] COMPLETE {}", block_id);
-                    println!("[ACK RX] Complete received for {}", block_id);
-                    println!("[SENDER] Completed block {}", block_id);
-                
-                    
-                    #[derive(Debug)]
                     enum Prior {
                         AlreadyResolved,
                         WasOpen,
                         WasPending(usize),
                         Unseen,
                     }
-                    println!(
-                            "[ACK RX] map size={} open_slots={} completed={}",
-                            block_states.len(),
-                            open_slots,
-                            completed
-                        );
                     let prior = match block_states.get(&block_id) {
                         Some(BlockSlot::Resolved) => Prior::AlreadyResolved,
                         Some(BlockSlot::Open(_)) => Prior::WasOpen,
@@ -822,24 +740,14 @@ impl Sender {
                             // bump `completed` again, or the loop could
                             // exit having never actually resolved every
                             // block.
-                                println!("[ACK RX] {} already resolved", block_id);
                             println!(
                                 "[WARN] duplicate Complete ack for already-resolved block {block_id} -- ignoring"
                             );
                         }
                         Prior::WasOpen => {
-                                println!("[ACK RX] {} was open -> resolving", block_id);
                             block_states.insert(block_id, BlockSlot::Resolved);
                             open_slots -= 1;
                             completed += 1;
-                             println!(
-                                    "[ACK RX] completed={}/{} open_slots={}",
-                                    completed,
-                                    total_blocks,
-                                    open_slots
-                                );
-                           
-                    
                         }
                         Prior::WasPending(n) => {
                             // The receiver resolved (very likely
@@ -847,7 +755,6 @@ impl Sender {
                             // sender ever got a pipeline slot to open it.
                             // Whatever's buffered for it is now moot --
                             // discard it. Never admitted, never reopened.
-                             println!("[ACK RX] {} was pending ({})", block_id, n);
                             println!(
                                 "[WARN] Complete ack for block {block_id} while {n} chunk(s) were \
                                  still buffered (never opened) -- discarding and marking resolved \
@@ -855,54 +762,22 @@ impl Sender {
                             );
                             block_states.insert(block_id, BlockSlot::Resolved);
                             completed += 1;
-   
-                          
                         }
                         Prior::Unseen => {
                             // Force-completed before the sender ever saw a
                             // single chunk for it. Mark resolved
                             // preemptively so nothing can ever open it.
-                            println!("[ACK RX] {} unseen", block_id);
                             println!(
                                 "[WARN] Complete ack for block {block_id} that the sender never saw \
                                  a single chunk for -- marking resolved preemptively"
                             );
                             block_states.insert(block_id, BlockSlot::Resolved);
                             completed += 1;
-                                  
-                            
                         }
                     }
-                               println!(
-    "[DEBUG] block={} prior={:?} completed={}/{} open_slots={}",
-    block_id,
-    prior,
-    completed,
-    total_blocks,
-    open_slots
-);
-     
                 }
             }
             
-            if total_blocks - completed <= 5 {
-    println!(
-        "========== Remaining {} ==========",
-        total_blocks - completed
-    );
-
-    for (id, slot) in &block_states {
-        match slot {
-            BlockSlot::Open(_) => println!("OPEN {}", id),
-            BlockSlot::Pending(_) => println!("PENDING {}", id),
-            BlockSlot::Resolved => {}
-        }
-    }
-
-    println!("==================================");
-}
-
-           
         }
 
         println!("==============================");
@@ -1052,22 +927,14 @@ impl Sender {
             )
         });
 
-        println!("[DEBUG] Waiting for reader...");
-reader.join().unwrap()?;
-println!("[DEBUG] Reader exited.");
+        reader.join().unwrap()?;
 
-for (i, worker) in workers.into_iter().enumerate() {
-    println!("[DEBUG] Waiting for worker {i}...");
-    worker.join().unwrap()?;
-    println!("[DEBUG] Worker {i} exited.");
-}
-
-println!("[DEBUG] All workers exited.");
-        println!("[SENDER] Waiting for block manager...");
+        for worker in workers {
+            worker.join().unwrap()?;
+        }
 
         let bytes_sent = manager_handle.join().unwrap()?;
 
-        println!("[SENDER] Block manager exited.");
         // The manager has resolved every block, but `ack_relay` is still
         // blocked in a TCP read waiting for a message the receiver will
         // never send again. Force it to unblock instead of leaving it

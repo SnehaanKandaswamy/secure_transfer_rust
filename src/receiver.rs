@@ -77,17 +77,8 @@ fn receiver_thread(
                 match tag {
                     TAG_DATA => {
                         let Some(pkt) = DataPacket::decode(body) else {
-    println!(
-        "[UDP] Failed to decode DATA packet (size={})",
-        body.len()
-    );
-    continue;
-};
-                        println!(
-    "[UDP] DATA block={} packet={}",
-    pkt.block_id,
-    pkt.packet_in_block
-);
+                            continue;
+                        };
 
                         let total = packets_in_block(pkt.block_id, expected_chunks);
 
@@ -105,13 +96,8 @@ fn receiver_thread(
                     }
                     TAG_BLOCK_END => {
                         let Some((block_id, total_packets)) = BlockEndPacket::decode(body) else {
-    println!(
-        "[UDP] Failed to decode BLOCK_END (size={})",
-        body.len()
-    );
-    continue;
-};
-                        println!("[UDP] END block={}", block_id);
+                            continue;
+                        };
 
                         state.mark_end_seen(block_id, total_packets as usize);
                     }
@@ -259,15 +245,7 @@ fn ack_manager_loop(
     let mut completed = 0u32;
 
     while completed < total_blocks_count {
-            println!(
-        "[LOOP] completed={}/{}",
-        completed,
-        total_blocks_count
-    );
-
         let ready = state.ready_for_check(grace, idle_timeout);
-        println!("tracked blocks = {}", state.tracked_blocks());
-println!("ready = {:?}", ready);
         if ready.is_empty() {
             std::thread::sleep(poll_tick);
             continue;
@@ -277,16 +255,7 @@ println!("ready = {:?}", ready);
             let Some((is_complete, missing, rounds)) = state.snapshot_and_tick(block_id) else {
                 continue;
             };
-            if !is_complete {
-                println!(
-                    "[CHECK] block={} missing={} rounds={}",
-                    block_id,
-                    missing.len(),
-                    rounds
-                );
-            }
             if is_complete {
-                println!("[ACK] Block {} complete", block_id);
                 BlockAck::Complete { block_id }.write_to(&mut control)?;
                 state.remove(block_id);
                 completed += 1;
@@ -299,17 +268,14 @@ println!("ready = {:?}", ready);
                 state.remove(block_id);
                 completed += 1;
             } else {
-    println!("[SEND MISSING] block={} packets={}", block_id, missing.len());
-
-    BlockAck::Missing {
-        block_id,
-        missing,
-    }
-    .write_to(&mut control)?;
-}
+                BlockAck::Missing {
+                    block_id,
+                    missing,
+                }
+                .write_to(&mut control)?;
+            }
         }
     }
-    println!("[ACK MANAGER EXIT]");
 
     Ok(())
 }
