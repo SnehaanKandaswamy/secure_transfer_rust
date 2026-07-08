@@ -208,6 +208,11 @@ fn place_chunk(
 
     // Cache-before-send ordering, unchanged from the earlier fix.
     entry.packets[packet_in_block as usize] = Some(chunk.packet.clone());
+    println!(
+    "[SEND] DATA block={} packet={}",
+    block_id,
+    packet_in_block
+);
 
     if let Err(e) = udp.send(&chunk.packet) {
         eprintln!("udp send failed (non-fatal, will retry): {e}");
@@ -233,6 +238,7 @@ fn place_chunk(
             entry.total
         );
         let end = BlockEndPacket::encode(block_id, entry.total as u32);
+        println!("[SEND] END block={}", block_id);
 
         if let Err(e) = udp.send(&end) {
             eprintln!("udp send failed (non-fatal, will retry): {e}");
