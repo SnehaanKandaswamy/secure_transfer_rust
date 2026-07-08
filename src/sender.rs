@@ -101,6 +101,10 @@ use crate::{
     crypto,
 };
 
+// TEMP DISABLED FOR PERFORMANCE TEST -- `RecvTimeoutError` is unused while
+// the event loop below is reverted to blocking `recv()`. Left imported
+// (harmless "unused import" warning) so restoring the `recv_timeout`
+// branch doesn't also require re-adding this import.
 use crossbeam_channel::{bounded, Receiver, RecvTimeoutError, Sender as ChannelSender};
 
 use crate::pipeline::{
@@ -379,6 +383,10 @@ fn drain_pending(
     }
 }
 
+// TEMP DISABLED FOR PERFORMANCE TEST -- this function is no longer called
+// anywhere (the `recv_timeout` timeout branch that called it has been
+// reverted to blocking `recv()` below). Left in place, unmodified, so it
+// can be wired back up simply by restoring that branch.
 /// True once the initial transmission of the entire file is completely
 /// done: every chunk the reader/encryption pipeline will ever produce has
 /// been admitted (so no `SenderEvent::Chunk` can arrive again), and no
@@ -398,6 +406,10 @@ fn initial_transmission_complete(
             .any(|slot| matches!(slot, BlockSlot::Pending(_)))
 }
 
+// TEMP DISABLED FOR PERFORMANCE TEST -- this function is no longer called
+// anywhere (see the reverted `events.recv()` block below). Left in place,
+// unmodified, so it can be wired back up simply by restoring the
+// `recv_timeout` branch that used to call it.
 /// Sender-side whole-block retransmission fallback. Scans every currently
 /// `Open` block and, for any block whose `BlockEnd` has already been sent
 /// but that has seen *no* ack activity (neither `Missing` nor `Complete`)
@@ -715,24 +727,17 @@ impl Sender {
             if completed >= total_blocks {
                 break;
             }
-            let event = match events.recv_timeout(Duration::from_millis(ACK_ACTIVITY_CHECK_INTERVAL_MS)) {
+            // TEMP DISABLED FOR PERFORMANCE TEST -- reverted to the
+            // original blocking `events.recv()`. The `recv_timeout` /
+            // periodic-wakeup infrastructure (and therefore
+            // `initial_transmission_complete()` and
+            // `retransmit_stale_blocks()`) is unreachable while this is in
+            // effect. To restore: swap this block back for the
+            // `recv_timeout(..)` match with the `RecvTimeoutError::Timeout`
+            // and `RecvTimeoutError::Disconnected` arms.
+            let event = match events.recv() {
                 Ok(event) => event,
-                Err(RecvTimeoutError::Timeout) => {
-                    // No chunk or ack arrived within the check interval --
-                    // this is the only place the whole-block fallback is
-                    // evaluated, and only once the initial transmission is
-                    // completely done (every chunk admitted, nothing left
-                    // `Pending`). While the file is still being sent, rely
-                    // solely on Missing-driven selective retransmission,
-                    // which runs entirely inside the
-                    // `SenderEvent::Ack(BlockAck::Missing { .. })` arm
-                    // above and is untouched by this gate.
-                    if initial_transmission_complete(&block_states, chunks_admitted, total_chunks) {
-                        retransmit_stale_blocks(&mut block_states, &udp, &mut retransmitted);
-                    }
-                    continue;
-                }
-                Err(RecvTimeoutError::Disconnected) => {
+                Err(_) => {
                     // Both relay threads have exited and the channel is
                     // empty (crossbeam only reports Disconnected once
                     // there is nothing left buffered to receive first) --
@@ -797,11 +802,6 @@ impl Sender {
                     );
                 }
                 SenderEvent::Ack(BlockAck::Missing { block_id, missing }) => {
-                    println!(
-    "[RESEND] block={} packets={}",
-    block_id,
-    missing.len()
-);
 
                     // Ack activity for this block -- reset the whole-block
                     // fallback timer. Deliberately separate from (and
